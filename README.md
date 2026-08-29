@@ -491,3 +491,9 @@ socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/maripepis.sock   # {"cmd": "subscribe"}
 ```bash
 pytest
 ```
+
+## Licencia
+
+[MIT](LICENSE) © 2026 Manu Guevara Casado. Puedes usar, modificar y distribuir
+Maripepis, incluso comercialmente, conservando el aviso de copyright. Sin
+garantía de ningún tipo.

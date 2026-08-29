@@ -1,0 +1,47 @@
+# Servicio systemd de usuario para Maripepis (tecla de hablar, push-to-talk global).
+#
+# El demonio mantiene Whisper cargado en la GPU para que la primera pulsación sea
+# instantánea. Las teclas se atan en ~/.config/hypr/bindings.lua (ver README).
+#
+# Instalar:
+#   mkdir -p ~/.config/systemd/user
+#   cp packaging/maripepis.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now maripepis
+#   journalctl --user -u maripepis -f      # ver logs
+#
+# El manos libres clásico sigue disponible en terminal:
+#   python -m maripepis --handsfree --speak
+#
+# Requiere una sesión gráfica con audio (PipeWire/PulseAudio) activa.
+# Ajusta WorkingDirectory/ExecStart si el proyecto no está en ~/Proyectos/maripepis.
+
+[Unit]
+Description=Maripepis — asistente de voz local (tecla de hablar)
+# Necesita la sesión gráfica: notify-send, wl-copy y hyprctl dependen de
+# WAYLAND_DISPLAY / DBUS_SESSION_BUS_ADDRESS / HYPRLAND_INSTANCE_SIGNATURE, que
+# uwsm publica en el gestor de usuario justo antes de graphical-session.target.
+After=graphical-session.target sound.target
+# Sin PartOf, el demonio sobreviviría al cierre de sesión con una firma de
+# Hyprland caduca (y el socket, a su compositor).
+PartOf=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Proyectos/maripepis
+# --config absoluto: load_config busca primero en el directorio actual, y las
+# rutas relativas como [tts].voice se resuelven contra él.
+ExecStart=%h/Proyectos/maripepis/.venv/bin/python -m maripepis --daemon --config %h/Proyectos/maripepis/config.toml
+Restart=on-failure
+RestartSec=3
+# Margen para la limpieza al recibir SIGTERM (cortar grabación, borrar socket).
+TimeoutStopSec=10
+# Clave de Claude (solo si [llm].backend = "claude"). El guion la hace opcional:
+#   mkdir -p ~/.config/maripepis
+#   echo 'ANTHROPIC_API_KEY=sk-ant-...' > ~/.config/maripepis/env
+#   chmod 600 ~/.config/maripepis/env
+EnvironmentFile=-%h/.config/maripepis/env
+
+[Install]
+WantedBy=graphical-session.target

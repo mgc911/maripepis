@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Modelos descargados (grandes)
+models/
+
+# Secretos / entorno local
+.env
+
+# Memoria permanente: datos personales (ver maripepis/memory.py)
+memoria.md
+
+# Caché de herramientas
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Ajustes locales de Claude Code (los compartidos irían en .claude/settings.json)
+.claude/settings.local.json
+
+# Copias de seguridad automáticas
+*.bak
+*.bak.*

@@ -1,0 +1,132 @@
+# Configuración de Maripepis. Copia/edita a tu gusto.
+
+[audio]
+sample_rate = 16000            # 16 kHz: lo que espera Whisper
+input_device = "default"       # micrófono (arecord -D); "default" = del sistema
+output_device = "default"      # altavoz (aplay -D); "default" = del sistema
+
+[vad]
+enabled = false                # true, o usa --handsfree, para manos libres (sin Enter)
+backend = "webrtc"             # de momento solo "webrtc"
+aggressiveness = 2             # 0-3 (más alto = corta antes con ruido de fondo)
+silence_ms = 800               # silencio (ms) para dar la frase por terminada
+max_utterance_ms = 15000       # tope de duración de una intervención
+min_speech_ms = 500            # voz real mínima; por debajo se descarta como ruido
+
+[stt]
+enabled = false                # true, o usa --listen, para hablar por micrófono
+engine = "whisper"
+model = "large-v3-turbo"       # lo mejor calidad/velocidad en GPU (descarga ~1.6 GB la 1ª vez)
+                               # sin GPU, usa "medium" o "small" con device="cpu"
+language = "es"                # "es" fijo, o "auto" para detectar idioma
+device = "cuda"                # cuda (tu RTX 5070) | cpu
+compute_type = "float16"       # float16 (GPU) | int8 (CPU)
+beam_size = 5                  # más alto = un poco más preciso y más lento
+# Pista de vocabulario/contexto: mejora nombres propios y jerga.
+initial_prompt = "Conversación en español con el asistente Maripepis."
+
+[llm]
+backend = "ollama"             # ollama | claude | claude-code  ← cambia SOLO esta línea
+                               # ollama      = local, offline, gratis
+                               # claude      = API de Anthropic (ANTHROPIC_API_KEY, se paga por token)
+                               # claude-code = tu suscripción de Claude, vía el CLI de Claude Code
+stream = true
+max_history = 10
+system_prompt = "Eres Maripepis, un asistente de voz breve muy majo, cercano y en español. Responde directamente, sin preámbulos, en 1-3 frases."
+
+[llm.ollama]
+host = "http://localhost:11434"
+model = "qwen2.5:7b"           # buen tool-calling y español (llama3.1:8b sobre-dispara)
+temperature = 0.7
+context = 8192                 # tokens de contexto (el servidor de Ollama da 4096 a
+                               # secas, y no llegan: solo el system prompt con la
+                               # memoria y las herramientas ya ronda los 2500). Si se
+                               # pasa, se recorta por el principio y el modelo empieza
+                               # a decir los comandos en voz alta en vez de ejecutarlos.
+                               # Sube a 16384 si tienes VRAM de sobra; 0 = lo que diga
+                               # el servidor.
+
+[llm.claude]
+model = "claude-opus-4-8"      # o "claude-haiku-4-5" para menor latencia/coste en respuestas cortas
+max_tokens = 1024              # las respuestas de voz son breves
+# La clave NO va aquí: se lee de la variable de entorno ANTHROPIC_API_KEY
+
+[llm.claude_code]
+# Backend "claude-code": no usa clave de API, usa tu SUSCRIPCIÓN. Habla con el
+# binario `claude` (Claude Code) en modo --print y le lee la respuesta según se
+# genera. Requisito: tener Claude Code instalado y haber entrado con tu cuenta
+# (ejecuta `claude` y usa /login). Si tienes ANTHROPIC_API_KEY en el entorno, se
+# ignora a propósito: si no, el turno se cobraría por token sin que se note.
+cli = "claude"                 # ejecutable (o ruta completa si no está en el PATH)
+model = ""                     # "" = el que tenga Claude Code; "sonnet", "haiku", "opus",
+                               # o el nombre completo ("claude-sonnet-5")
+tools = ""                     # herramientas PROPIAS de Claude Code (las de [tools] no le
+                               # llegan): "" = ninguna (asistente conversacional a secas)
+                               # "Bash,WebSearch,Read" = esas | "default" = todas
+                               # OJO: su Bash no pasa por el guard de [tools.shell]
+permission_mode = ""           # obligatorio si activas `tools`: sin terminal detrás nadie
+                               # puede aprobar permisos. "bypassPermissions" (sin frenos),
+                               # "acceptEdits" o "dontAsk"
+safe_mode = true               # ignora CLAUDE.md, plugins, hooks y MCP del sistema: sin
+                               # esto cada turno arrastra decenas de miles de tokens que
+                               # no pintan nada en una conversación hablada
+timeout_s = 120                # corta el turno si el CLI se atasca
+cwd = ""                       # directorio de trabajo del CLI ("" = desde donde lances
+                               # maripepis); solo importa si le das herramientas
+
+[tts]
+enabled = false                # true, o usa --speak, para responder por voz
+engine = "piper"
+voice = "models/piper/es_ES-sharvard-medium.onnx"
+speed = 1.15
+
+[tools]
+enabled = true                 # el asistente puede abrir apps, buscar en internet
+                               # y ejecutar comandos
+                               # (requiere un LLM con tool-calling: llama3.1, qwen2.5, claude...)
+
+[tools.shell]
+# Tocar tus ficheros: órdenes de zsh («créame una carpeta fotos» y te la crea, no
+# te explica cómo) y escribir documentos («guárdame la lista de la compra»). Son
+# las herramientas con más alcance: lee esto antes de tocarlo.
+enabled = true                 # false = el asistente no puede tocar tus ficheros
+                               # (ni ejecutar_comando ni escribir_fichero)
+guard = true                   # veta lo irreversible (formatear, rm de / o del home,
+                               # curl | sh). false = sin red; tú verás
+timeout_s = 20                 # corta el comando si tarda más (no hay teclado detrás:
+                               # lo que pida datos se queda esperando hasta aquí)
+max_output_chars = 2000        # tope de salida que se le pasa al LLM (y que puede acabar
+                               # dicha en voz alta)
+
+[memory]
+enabled = true                 # datos fijos del usuario y del equipo, siempre presentes
+path = ""                      # vacío = ~/.config/maripepis/memoria.md, o memoria.md junto
+                               # a este fichero (las rutas relativas van contra config.toml)
+max_chars = 4000               # tope de seguridad: la memoria viaja en CADA petición al LLM
+
+[hotkey]
+# Tecla de hablar global (--daemon + ALT+Z en Hyprland). Ver README.
+socket = ""                    # ruta del socket; vacío = $XDG_RUNTIME_DIR/maripepis.sock
+speak = true                   # el modo asistente responde por voz (Piper)
+silence_ms = 2500              # red de seguridad: corta si te callas este rato
+                               # (más largo que [vad]: aquí piensas con la tecla pulsada)
+max_ms = 60000                 # tope duro: corta al minuto aunque no sueltes la tecla
+min_speech_ms = 300            # voz real mínima; por debajo se descarta como ruido
+aggressiveness = 2             # 0-3 del VAD, igual que en [vad]
+context_timeout_s = 300        # olvida la conversación tras 5 min sin usarla (0 = nunca)
+notify = true                  # avisos de escritorio (notify-send)
+notify_chars = 240             # recorta el texto largo en los avisos
+window = true                  # ventana de chat: se abre sola con ALT+Z (no con el
+                               # dictado) y va escribiendo la conversación. Dónde
+                               # aparece lo decide Hyprland: ver la regla
+                               # ^maripepis-chat$ en ~/.config/hypr/hyprland.lua
+window_python = ""             # "" = `python3` del sistema, que es el que ve GTK4
+                               # (python-gobject); el .venv del proyecto no lo ve
+auto_paste = false             # en dictado, además de copiar, pega en la ventana activa
+                               # (SHIFT+Insert; puede dejar modificadores pegados — ver README)
+paste_delay_ms = 250           # espera antes de pegar, para que sueltes ALT/SHIFT
+
+[app]
+wake_word = ""                 # p.ej. "oye maripepis": en voz, solo responde si la oye
+exit_phrases = ["adiós maripepis", "hasta luego"]   # además de: salir, adiós, chao...
+log_level = "INFO"

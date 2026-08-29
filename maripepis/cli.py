@@ -358,6 +358,21 @@ def instrucciones_de_herramientas(nombres: set[str]) -> str:
             " Y escribir texto dentro de un fichero (escribir_fichero): notas, listas,"
             " documentos. Esa, y no un `echo` ni un editor, es la de «guárdame esto»."
         )
+    if "leer_fichero" in nombres:
+        instrucciones += (
+            " Para mirar lo que hay dentro de un fichero tienes leer_fichero, y es"
+            " OBLIGATORIA antes de cambiar, corregir o ampliar uno que ya existe:"
+            " léelo, y vuelve a escribirlo entero con escribir_fichero en modo"
+            " «sobrescribir». No des por sabido lo que pone porque lo escribieras tú"
+            " antes: en el historial está lo que dijiste, no lo que quedó en el disco."
+        )
+    if "consultar_tiempo" in nombres:
+        instrucciones += (
+            " Para el tiempo (el de hoy y hasta 3 días) usa consultar_tiempo, que trae"
+            " los datos de verdad. Si te piden apuntar una previsión en un fichero,"
+            " consúltala PRIMERO y escribe después: un documento con los días puestos"
+            " y vacíos no vale de nada."
+        )
     # Lo importante: que actúe. Sin esta orden, ante «créame una carpeta» el
     # modelo contesta con un `mkdir` para que lo escriba el usuario, que es
     # justo lo que no sirve cuando se lo estás pidiendo hablando.

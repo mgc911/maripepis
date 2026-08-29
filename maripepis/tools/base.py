@@ -11,6 +11,15 @@ from dataclasses import dataclass
 # que el modelo cuente después.
 PREFIJOS_FALLO = ("no he ", "no ha ", "no pude ", "he cortado", "error")
 
+#: Separador entre lo que se le puede contar al usuario y lo que va dirigido al
+#: modelo (cómo reintentar). Lo de detrás NO se dice en voz alta nunca.
+#:
+#: Antes esto se hacía con una lista de frases a cortar («. Corrige», «. Díselo»…)
+#: y era ir a la caza: en cuanto se reescribió un mensaje de error sin usar
+#: ninguna de ellas, el usuario acabó oyendo «vuelve a llamarme en modo
+#: sobrescribir con el texto entero ya cor», cortado a mitad de palabra.
+MARCA_MODELO = "\n[Para el modelo]"
+
 
 def es_fallo(resultado: str) -> bool:
     """¿El resultado de una herramienta dice que la acción NO se hizo?"""

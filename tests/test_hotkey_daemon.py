@@ -6,7 +6,15 @@ import socket
 import pytest
 
 from maripepis.hotkey import daemon as mod
-from maripepis.hotkey.daemon import IDLE, LOADING, PROCESSING, RECORDING, SPEAKING, HotkeyDaemon
+from maripepis.hotkey.daemon import (
+    IDLE,
+    LOADING,
+    PROCESSING,
+    RECORDING,
+    SPEAKING,
+    THINKING,
+    HotkeyDaemon,
+)
 from maripepis.llm.conversation import Conversation
 from maripepis.tools.base import Tool
 from maripepis.tools.runner import Acciones
@@ -265,7 +273,9 @@ def test_cancel_vuelve_a_reposo():
 
 def test_status_y_ping():
     d = build()
-    assert d.handle({"cmd": "status"}) == {"ok": True, "state": IDLE}
+    # Lleva el motor en uso: es lo que deja al switch de la ventana abrir bien puesto.
+    assert d.handle({"cmd": "status"}) == {"ok": True, "state": IDLE,
+                                           "backend": "ollama"}
     assert d.handle({"cmd": "ping"})["state"] == IDLE
 
 
@@ -660,3 +670,357 @@ def test_un_execute_que_no_es_de_maripepis_no_revienta():
     # `execute` es solo un invocable: si no trae `on_call`, no se le engancha nada.
     d = build(execute=lambda nombre, args: "Hecho: ya está.")
     assert d.execute is not None
+
+
+# ── el switch de motor ───────────────────────────────────────────────────
+
+class ProviderNube(FakeProvider):
+    label = "Claude · nube"
+
+
+def _con_backend(monkeypatch, provider=None, revienta=None):
+    """Demonio con `[llm]` y una fábrica de proveedores controlada."""
+    def _fabrica(cfg):
+        if revienta:
+            raise RuntimeError(revienta)
+        return provider or ProviderNube()
+
+    monkeypatch.setattr(mod, "build_provider", _fabrica)
+    d = build()
+    d.cfg = {"llm": {"backend": "ollama", "ollama": {"model": "qwen2.5:7b"}}}
+    d._backend = "ollama"
+    return d
+
+
+def test_cambia_de_motor_en_caliente(monkeypatch):
+    d = _con_backend(monkeypatch)
+
+    resp = d.handle({"cmd": "backend", "value": "claude"})
+
+    assert resp == {"ok": True, "state": IDLE, "backend": "claude"}
+    assert d.provider.label == "Claude · nube"
+    assert d.handle({"cmd": "status"})["backend"] == "claude"
+
+
+def test_el_historial_sobrevive_al_cambio(monkeypatch):
+    # Es lo que hace que el switch sirva a mitad de conversación: `Conversation`
+    # es neutra, así que se sigue por donde se iba pero con el otro motor.
+    d = _con_backend(monkeypatch)
+    d.conversation.add_user("hola")
+    d.conversation.add_assistant("buenas")
+
+    d.handle({"cmd": "backend", "value": "claude"})
+
+    assert [m["content"] for m in d.conversation.messages] == ["hola", "buenas"]
+
+
+def test_si_el_motor_nuevo_no_se_puede_construir_no_se_cambia(monkeypatch):
+    # El caso de verdad: el backend `claude` sin ANTHROPIC_API_KEY revienta al
+    # instanciarse. Cambiar y enterarse en el turno siguiente dejaría a maripepis
+    # muda a mitad de conversación.
+    d = _con_backend(monkeypatch, revienta="falta ANTHROPIC_API_KEY")
+    antes = d.provider
+
+    resp = d.handle({"cmd": "backend", "value": "claude"})
+
+    assert resp["ok"] is False
+    assert "ANTHROPIC_API_KEY" in resp["error"]
+    assert d.provider is antes            # el de siempre sigue en su sitio
+    assert d._backend == "ollama"
+
+
+def test_un_motor_que_no_existe_se_rechaza(monkeypatch):
+    d = _con_backend(monkeypatch)
+    resp = d.handle({"cmd": "backend", "value": "gemini"})
+
+    assert resp["ok"] is False
+    assert d._backend == "ollama"
+
+
+def test_no_se_cambia_de_motor_a_mitad_de_turno(monkeypatch):
+    # El proveedor lo está usando otro hilo: cambiarlo debajo es pedir un lío.
+    d = _con_backend(monkeypatch)
+    d._state = PROCESSING
+
+    resp = d.handle({"cmd": "backend", "value": "claude"})
+
+    assert resp == {"ok": False, "error": "ocupado", "state": PROCESSING,
+                    "backend": "ollama"}
+
+
+def test_cambiar_al_que_ya_esta_no_hace_nada(monkeypatch):
+    d = _con_backend(monkeypatch)
+    antes = d.provider
+    assert d.handle({"cmd": "backend", "value": "ollama"})["ok"] is True
+    assert d.provider is antes
+
+
+def test_el_cambio_se_les_cuenta_a_las_ventanas(monkeypatch):
+    d = _con_backend(monkeypatch)
+    visor = con_visor(d)
+
+    d.handle({"cmd": "backend", "value": "claude"})
+
+    evs = visor.de("backend")
+    assert evs and evs[0]["backend"] == "claude"
+    assert evs[0]["ok"] is True
+
+
+def test_la_bienvenida_dice_en_que_motor_esta(monkeypatch):
+    # Es lo que deja al switch de la ventana abrir en la posición correcta.
+    d = _con_backend(monkeypatch)
+    hola = d._hello()
+
+    assert hola["backend"] == "ollama"
+    assert hola["backend_label"]
+
+
+# ── pensar no es hablar ──────────────────────────────────────────────────
+
+
+class ProviderLento(FakeProvider):
+    """Provider que tarda en soltar el primer trozo, como Claude Code."""
+
+    def __init__(self, reply="Ya está.", antes=None) -> None:
+        super().__init__(reply)
+        self.antes = antes or (lambda: None)
+
+    def stream_reply(self, system_prompt, messages):
+        self.turnos += 1
+
+        def gen():
+            self.antes()          # aquí es donde el de verdad busca en internet
+            yield from re.findall(r"\S+\s*", self.reply)
+
+        return gen()
+
+
+def test_mientras_piensa_no_dice_que_habla():
+    """El fallo que se veía con Claude Code: diez segundos de «🗣️ hablando…»
+    sin que se oyera nada, porque el estado saltaba antes de haber respuesta."""
+    estados_al_pensar = []
+    d = build(provider=ProviderLento(antes=lambda: estados_al_pensar.append(d.state)))
+    visor = con_visor(d)
+
+    turno(d)
+
+    # Cuando el proveedor aún estaba trabajando, el estado era «pensando».
+    assert estados_al_pensar == [THINKING]
+    secuencia = [e["state"] for e in visor.de("state")]
+    assert secuencia == [RECORDING, PROCESSING, THINKING, SPEAKING, IDLE]
+
+
+def test_el_salto_a_hablando_va_antes_del_primer_trozo():
+    d = build(provider=FakeProvider("Muy buenas."))
+    visor = con_visor(d)
+
+    turno(d)
+
+    tipos = visor.tipos()
+    assert tipos.index("state", tipos.index("user")) < tipos.index("delta")
+
+
+def test_sin_streaming_tambien_acaba_hablando():
+    """`run_tools_turn` no da tokens: sin red de seguridad se quedaría pensando."""
+    tools = [Tool("ejecutar_comando", "ejecuta", {}, lambda **k: "Hecho")]
+    execute = Acciones(tools, LOG)
+    d = build(provider=ProviderConAcciones(), tools=tools, execute=execute)
+    visor = con_visor(d)
+
+    turno(d)
+
+    assert SPEAKING in [e["state"] for e in visor.de("state")]
+
+
+def test_se_puede_interrumpir_mientras_piensa():
+    """Antes el barge-in solo valía en SPEAKING; pensando dura mucho más."""
+    voz = FakeSpeech()
+    d = build(speech=voz)
+    d._state = THINKING
+
+    resp = d.handle({"cmd": "start", "mode": "assistant"})
+
+    assert resp == {"ok": True, "state": RECORDING}
+    assert voz.paradas == 1
+
+
+def test_cancelar_mientras_piensa_calla_la_voz():
+    voz = FakeSpeech()
+    d = build(speech=voz)
+    d._state = THINKING
+
+    assert d.handle({"cmd": "cancel"}) == {"ok": True, "state": IDLE}
+    assert voz.paradas == 1
+
+
+# ── las herramientas del proveedor (Claude Code) ─────────────────────────
+
+
+class ProviderConSusHerramientas(FakeProvider):
+    """Provider que trae las suyas y avisa por `on_tool`, como Claude Code."""
+
+    accepts_tools = False
+
+    def __init__(self, reply="Hecho.") -> None:
+        super().__init__(reply)
+        self.on_tool = None
+        self.on_file = None
+
+    def stream_reply(self, system_prompt, messages):
+        self.turnos += 1
+        self.on_tool("Bash", "Bash · free -h", True)
+        return iter(re.findall(r"\S+\s*", self.reply))
+
+
+def test_las_herramientas_del_proveedor_salen_en_la_ventana():
+    d = build(provider=ProviderConSusHerramientas())
+    visor = con_visor(d)
+
+    turno(d)
+
+    herramienta = visor.de("tool")[0]
+    assert herramienta["name"] == "Bash"
+    assert herramienta["text"] == "Bash · free -h"
+    assert herramienta["ok"] is True
+
+
+def test_al_cambiar_de_motor_el_nuevo_tambien_avisa(monkeypatch):
+    nuevo = ProviderConSusHerramientas()
+    monkeypatch.setattr(mod, "build_provider", lambda cfg: nuevo)
+    d = build()
+
+    assert d.handle({"cmd": "backend", "value": "claude-code"})["ok"] is True
+    assert nuevo.on_tool == d._al_ejecutar_el_proveedor
+    assert nuevo.on_file == d._mostrar_documento
+
+
+# ── el fichero escrito se ve en la ventana ───────────────────────────────
+
+
+def test_al_escribir_un_fichero_se_manda_a_la_ventana(tmp_path):
+    destino = tmp_path / "lista.md"
+
+    def escribir(args):
+        destino.write_text("# La compra\n- pan\n", encoding="utf-8")
+        return f"Hecho: he escrito {destino}."
+
+    tools = [Tool("escribir_fichero", "escribe", {}, escribir)]
+    execute = Acciones(tools, LOG)
+    d = build(provider=ProviderConAcciones(
+        llamadas=(("escribir_fichero", {"ruta": str(destino)}),)), 
+        tools=tools, execute=execute)
+    visor = con_visor(d)
+
+    turno(d)
+
+    doc = visor.de("document")[0]
+    assert doc["path"] == str(destino)
+    assert doc["text"] == "# La compra\n- pan\n"
+
+
+def test_lo_que_se_enseña_es_el_fichero_no_lo_que_se_le_metio(tmp_path):
+    """En modo «añadir», el argumento son las líneas nuevas; el fichero, todo."""
+    destino = tmp_path / "lista.md"
+    destino.write_text("- pan\n", encoding="utf-8")
+
+    def añadir(args):
+        with open(destino, "a", encoding="utf-8") as f:
+            f.write(args.get("contenido", ""))
+        return f"Hecho: he ampliado {destino}."
+
+    tools = [Tool("escribir_fichero", "escribe", {}, añadir)]
+    execute = Acciones(tools, LOG)
+    d = build(provider=ProviderConAcciones(llamadas=(
+        ("escribir_fichero", {"ruta": str(destino), "contenido": "- leche\n",
+                              "modo": "añadir"}),)), tools=tools, execute=execute)
+    visor = con_visor(d)
+
+    turno(d)
+
+    assert visor.de("document")[0]["text"] == "- pan\n- leche\n"
+
+
+def test_un_fichero_que_falla_no_se_enseña(tmp_path):
+    tools = [Tool("escribir_fichero", "escribe",  {},
+                  lambda a: "NO he escrito nada: es una carpeta.")]
+    execute = Acciones(tools, LOG)
+    d = build(provider=ProviderConAcciones(llamadas=(
+        ("escribir_fichero", {"ruta": str(tmp_path / "no.md")}),)),
+        tools=tools, execute=execute)
+    visor = con_visor(d)
+
+    turno(d)
+
+    assert visor.de("document") == []
+
+
+def test_un_comando_que_deja_un_fichero_no_se_enseña(tmp_path):
+    """`echo … > x` también escribe, pero adivinar cuál es inventarse el documento."""
+    tools = [Tool("ejecutar_comando", "ejecuta", {}, lambda a: "Hecho: listo.")]
+    execute = Acciones(tools, LOG)
+    d = build(provider=ProviderConAcciones(llamadas=(
+        ("ejecutar_comando", {"comando": f"echo hola > {tmp_path}/x.md"}),)),
+        tools=tools, execute=execute)
+    visor = con_visor(d)
+
+    turno(d)
+
+    assert visor.de("document") == []
+
+
+def test_el_write_de_claude_code_tambien_enseña_el_fichero(tmp_path):
+    destino = tmp_path / "nota.md"
+    destino.write_text("# Nota\n", encoding="utf-8")
+
+    class ProviderQueEscribe(FakeProvider):
+        accepts_tools = False
+
+        def __init__(self):
+            super().__init__("Ahí lo tienes.")
+            self.on_tool = None
+            self.on_file = None
+
+        def stream_reply(self, system_prompt, messages):
+            self.on_tool("Write", f"Write · {destino}", True)
+            self.on_file(str(destino))       # al volver, con el fichero ya escrito
+            return iter(["Ahí lo tienes."])
+
+    d = build(provider=ProviderQueEscribe())
+    visor = con_visor(d)
+
+    turno(d)
+
+    assert visor.de("document")[0]["text"] == "# Nota\n"
+
+
+def test_al_leer_un_fichero_tambien_se_enseña(tmp_path):
+    """«enséñame el resumen» no se queda en contártelo: se ve el documento."""
+    origen = tmp_path / "resumen.md"
+    origen.write_text("# Resumen\n\nTodo bien.\n", encoding="utf-8")
+
+    tools = [Tool("leer_fichero", "lee", {},
+                  lambda a: f"Contenido de {origen}: # Resumen")]
+    execute = Acciones(tools, LOG)
+    d = build(provider=ProviderConAcciones(
+        llamadas=(("leer_fichero", {"ruta": str(origen)}),)),
+        tools=tools, execute=execute)
+    visor = con_visor(d)
+
+    turno(d)
+
+    doc = visor.de("document")[0]
+    assert doc["path"] == str(origen)
+    assert doc["text"] == "# Resumen\n\nTodo bien.\n"
+
+
+def test_un_fichero_que_no_se_puede_leer_no_deja_hueco(tmp_path):
+    tools = [Tool("leer_fichero", "lee", {}, lambda a: "NO he leído nada: no existe.")]
+    execute = Acciones(tools, LOG)
+    d = build(provider=ProviderConAcciones(
+        llamadas=(("leer_fichero", {"ruta": str(tmp_path / "fantasma.md")}),)),
+        tools=tools, execute=execute)
+    visor = con_visor(d)
+
+    turno(d)
+
+    assert visor.de("document") == []

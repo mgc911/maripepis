@@ -8,6 +8,11 @@ tú. Que es justo lo contrario de lo que se le ha pedido.
 
 Con una herramienta propia el contenido viaja como un argumento más —sin shell
 de por medio— y el modelo la encuentra a la primera.
+
+Y aquí vive también la mitad que faltaba, `leer_fichero`: sin ella, «revisa el
+documento que me hiciste» no tiene respuesta posible, porque del turno anterior
+al modelo solo le queda su propia frase. Y antes que reconocerlo, se inventa lo
+que pone y te asegura que lo ha corregido.
 """
 
 from __future__ import annotations
@@ -16,13 +21,20 @@ import logging
 import os
 from pathlib import Path
 
-from .base import Tool
+from .base import MARCA_MODELO, Tool
 from .carpetas import descripcion as descripcion_carpetas
 from .carpetas import resolver_ruta
 
 log = logging.getLogger("maripepis.ficheros")
 
 MAX_CHARS = 100_000
+# Lo que se le pasa al modelo al leer. Va bastante por debajo de MAX_CHARS: aquí
+# el texto entra en el contexto de cada petición siguiente, y con num_ctx en 8192
+# un documento largo se come el turno entero.
+MAX_LECTURA = 4_000
+# Tope de lo que se saca del disco antes de mirar si es texto: un binario o un
+# log de un giga no se leen «por si acaso».
+MAX_BYTES = 1_000_000
 
 
 def escribir_fichero(args: dict) -> str:
@@ -51,10 +63,16 @@ def escribir_fichero(args: dict) -> str:
     # el micrófono entienda «notas» donde has dicho «notitas». Si ya existe, se
     # pregunta; para pisarlo hay que pedirlo por su nombre.
     if destino.exists() and modo == "crear":
+        # Una sola orden, y la primera. Con la versión larga («si el usuario te ha
+        # pedido cambiarlo, léelo antes con leer_fichero y vuelve en modo...») el
+        # 7B repetía la llamada idéntica, sin `modo`, una y otra vez: el usuario
+        # decía «sobrescríbelo» tres veces y el fichero seguía igual.
         return (
-            f"NO he escrito nada: {destino} ya existe. Pregúntale al usuario si quiere "
-            "que le AÑADAS el texto al final (modo «añadir») o que lo SOBRESCRIBAS "
-            "entero (modo «sobrescribir»), y vuelve a llamarme con el modo que te diga."
+            f"NO he escrito nada: {destino} ya existe."
+            + MARCA_MODELO
+            + ' Repite AHORA esta misma llamada añadiendo modo="sobrescribir" (pisa lo '
+            'que hubiera) o modo="añadir" (escribe al final). Sin el argumento modo no '
+            "toco un fichero que ya existe, por muchas veces que lo intentes."
         )
 
     try:
@@ -82,8 +100,99 @@ def escribir_fichero(args: dict) -> str:
     log.info("Escrito %s (%d líneas, %d caracteres)", destino, lineas, len(contenido))
     return (
         f"Hecho: {accion} {destino} ({lineas} línea{'s' if lineas != 1 else ''}, "
-        f"{len(contenido)} caracteres). Dile al usuario dónde ha quedado, en una frase."
+        f"{len(contenido)} caracteres)." + MARCA_MODELO
+        + " Dile al usuario dónde ha quedado, en una frase."
     )
+
+
+def leer_fichero(args: dict) -> str:
+    """Devuelve lo que hay dentro de un fichero de texto.
+
+    Sin esto, «revisa el documento que me hiciste» no tiene respuesta posible: el
+    modelo no ve el disco, y lo único que le queda del turno anterior es su propia
+    frase. Antes que decir que no puede, se inventa el contenido y te asegura que
+    lo ha corregido.
+    """
+    nombre = (args.get("ruta") or args.get("fichero") or args.get("archivo") or "").strip()
+    if not nombre:
+        return "¿Qué fichero quieres que lea?"
+
+    carpeta = str(args.get("carpeta") or args.get("directorio") or "")
+    origen = resolver_ruta(nombre, carpeta)
+
+    if origen.is_dir():
+        return f"NO he leído nada: {origen} es una carpeta, no un fichero."
+    if not origen.exists():
+        return (
+            f"NO he leído nada: {origen} no existe."
+            + MARCA_MODELO
+            + " Díselo al usuario tal cual, sin inventarte lo que pondría; si acaso, "
+            "pregúntale dónde está."
+        )
+
+    try:
+        tamano = origen.stat().st_size
+        with open(origen, "rb") as f:
+            crudo = f.read(MAX_BYTES)
+    except OSError as e:
+        log.warning("No pude leer %s: %s", origen, e)
+        return f"NO he leído nada: {origen} ha dado un error ({e.strerror})."
+
+    # Un `\0` en el primer megabyte y no hay más que hablar: leer un binario en
+    # voz alta no le sirve a nadie, y de paso ensucia el contexto para el resto
+    # de la conversación.
+    if b"\0" in crudo:
+        return f"NO he leído nada: {origen} no es un fichero de texto."
+    if not tamano:
+        return f"{origen} existe pero está vacío: no tiene nada dentro."
+
+    texto = crudo.decode("utf-8", "replace")
+    recorte = ""
+    if len(texto) > MAX_LECTURA:
+        texto = texto[:MAX_LECTURA]
+        recorte = (
+            f" [Solo los primeros {MAX_LECTURA} caracteres de {tamano}: si vas a "
+            "reescribirlo entero, avisa al usuario de que no lo has visto completo.]"
+        )
+
+    lineas = texto.count("\n") + (0 if texto.endswith("\n") else 1)
+    log.info("Leído %s (%d líneas, %d caracteres)", origen, lineas, len(texto))
+    return (
+        f"Contenido de {origen} ({lineas} línea{'s' if lineas != 1 else ''}, "
+        f"{tamano} caracteres):{recorte}\n{texto}"
+    )
+
+
+# Lo que se le manda a la ventana de chat cuando se escribe un fichero. Es más
+# generoso que MAX_LECTURA porque aquí el texto NO entra en el contexto del
+# modelo: solo viaja por el socket y se pinta. Y menos que MAX_CHARS porque un
+# documento de cien mil caracteres en una burbuja no lo lee nadie.
+MAX_VENTANA = 20_000
+
+
+def para_la_ventana(destino: Path) -> tuple[str, str] | None:
+    """El fichero recién escrito, para enseñarlo en el chat: ``(ruta, contenido)``.
+
+    Se vuelve a leer del disco en vez de reutilizar el argumento `contenido` a
+    propósito: en modo «añadir» ese argumento son solo las líneas nuevas, y
+    enseñarlas bajo el nombre del fichero sería enseñar otra cosa. Lo que se
+    pinta es el fichero, no lo que se le acaba de meter.
+
+    Devuelve None si no hay nada que enseñar (se borró, es binario, no se puede
+    leer). Nunca lanza: esto cuelga del camino de un turno de voz.
+    """
+    try:
+        crudo = destino.read_bytes()[:MAX_BYTES]
+    except OSError as e:
+        log.debug("No pude releer %s para la ventana: %s", destino, e)
+        return None
+    if not crudo or b"\0" in crudo:
+        return None
+
+    texto = crudo.decode("utf-8", "replace")
+    if len(texto) > MAX_VENTANA:
+        texto = texto[:MAX_VENTANA] + "\n\n[…recortado: el fichero sigue en el disco]"
+    return str(destino), texto
 
 
 def build_file_tool() -> Tool:
@@ -96,6 +205,9 @@ def build_file_tool() -> Tool:
             "una nota», «apunta esto en un fichero», «hazme una lista». "
             "Escríbelo tú aquí: no abras un editor para que lo teclee el usuario, ni "
             "montes un `echo` con `ejecutar_comando`. "
+            "Para CAMBIAR un fichero que ya existe: léelo antes con leer_fichero y "
+            "vuelve aquí en modo 'sobrescribir' con el texto entero ya corregido. "
+            "Nunca digas que lo has actualizado sin haber pasado por aquí. "
             + descripcion_carpetas()
         ),
         parameters={
@@ -120,8 +232,11 @@ def build_file_tool() -> Tool:
                     "type": "string",
                     "enum": ["crear", "sobrescribir", "añadir"],
                     "description": (
-                        "'crear' (por defecto) avisa si el fichero ya existe; "
-                        "'sobrescribir' lo reemplaza entero; 'añadir' escribe al final."
+                        "OBLIGATORIO si el fichero ya existe. 'crear' (por defecto) "
+                        "solo sirve para uno nuevo: si ya existe no escribe nada. "
+                        "'sobrescribir' lo reemplaza entero, y es el que quiere el "
+                        "usuario cuando dice «cámbialo», «actualízalo», «corrígelo» o "
+                        "«sobrescríbelo». 'añadir' escribe al final."
                     ),
                 },
                 "carpeta": {
@@ -132,4 +247,40 @@ def build_file_tool() -> Tool:
             "required": ["ruta", "contenido"],
         },
         handler=escribir_fichero,
+    )
+
+
+def build_read_tool() -> Tool:
+    """La herramienta de leer ficheros: la mitad que faltaba de la de escribir."""
+    return Tool(
+        name="leer_fichero",
+        description=(
+            "Lee un fichero de texto del equipo y te devuelve lo que hay dentro. "
+            "Es LA herramienta para «revisa el documento», «qué pone en...», «léeme "
+            "la nota», «mira el fichero que hiciste». "
+            "Y es OBLIGATORIA antes de modificar, corregir o ampliar algo que ya "
+            "existe: lee primero para saber qué hay, y luego escribe con "
+            "escribir_fichero en modo 'sobrescribir'. "
+            "Nunca des por sabido lo que pone un fichero porque lo escribieras en un "
+            "turno anterior: léelo. "
+            + descripcion_carpetas()
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "ruta": {
+                    "type": "string",
+                    "description": (
+                        "Nombre del fichero, con carpeta si hace falta: 'notas.txt', "
+                        "'documentos/lista.txt' o una ruta completa."
+                    ),
+                },
+                "carpeta": {
+                    "type": "string",
+                    "description": "Carpeta en la que está (opcional), p.ej. 'documentos'.",
+                },
+            },
+            "required": ["ruta"],
+        },
+        handler=leer_fichero,
     )

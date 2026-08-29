@@ -3,6 +3,14 @@
 Aquí vive lo que no depende de cómo se pidió el turno (Enter, VAD o ALT+Z):
 pedirle la respuesta al LLM (con herramientas si el modelo las soporta), irla
 hablando frase a frase y guardarla en el historial.
+
+En el historial va la respuesta y nada más. Hubo una versión que le añadía una
+nota con lo que las herramientas habían hecho («escribir_fichero → Hecho: he
+escrito /home/…»), para que el turno siguiente supiera la ruta de verdad. Salió
+al revés: medido sobre qwen2.5:7b, con esa nota el turno siguiente no llamaba a
+**ninguna** herramienta (0 de 6) —leía que ya estaba hecho y se quedaba tan
+ancho—, y sin ella sí llamaba. Para saber qué hay en un fichero está
+`leer_fichero`, que para eso se hizo.
 """
 
 from __future__ import annotations
@@ -12,6 +20,7 @@ from collections.abc import Callable
 from .llm.conversation import Conversation
 from .utils.phrases import normalize
 from .utils.sentences import iter_sentences
+from .veracidad import lo_que_no_ha_hecho
 
 # Pistas de que la respuesta ya está reconociendo que algo no ha ido bien. Si
 # aparece alguna, el aviso sobra; si no, se añade.
@@ -46,20 +55,33 @@ def stream_reply_text(provider, conversation: Conversation, speech=None,
 
 
 def _desmentir_si_hace_falta(reply: str, execute, logger) -> str:  # noqa: ANN001
-    """Añade la verdad si el modelo canta victoria sobre algo que ha fallado.
+    """Añade la verdad si el modelo canta victoria sobre algo que no ha pasado.
 
-    Un 7B se salta el «NO he ejecutado nada» de la herramienta y remata el turno
-    con un «ya lo tienes». Quien lo escucha no ve la pantalla: se queda tan
-    contento con una carpeta que no existe. Antes que fiarlo todo al prompt, se
-    comprueba lo que las herramientas dijeron de verdad.
+    Son dos mentiras distintas, y la segunda es peor. Una: la herramienta dijo
+    «NO he ejecutado nada» y el modelo remata el turno con un «ya lo tienes».
+    Otra: el modelo no llama a ninguna herramienta y narra el éxito igual —el
+    fichero se queda como estaba y no hay ni un fallo que enseñar—. Esta segunda
+    es la que se cuela en una conversación larga, cuando el modelo se cree que ya
+    lo hizo porque lo dijo antes.
+
+    Quien escucha no ve la pantalla: sin esto, las dos suenan exactamente igual
+    que si hubiera funcionado. Y no basta con pedírselo por el system prompt,
+    que es lo que ya se le pide y no lo cumple.
     """
-    motivo = getattr(execute, "ultimo_fallo", None)
-    if not motivo:
-        return reply
     if _admite_el_fallo(reply):
         return reply
-    logger.warning("El modelo daba por hecho algo que falló (%s); lo desmiento.", motivo)
-    aviso = f"Aviso: en realidad no ha funcionado, {motivo}."
+
+    motivo = getattr(execute, "ultimo_fallo", None)
+    if motivo:
+        logger.warning("El modelo daba por hecho algo que falló (%s); lo desmiento.", motivo)
+        aviso = f"Aviso: en realidad no ha funcionado, {motivo}."
+    elif (sin_hacer := lo_que_no_ha_hecho(reply, execute)):
+        logger.warning("El modelo presume de algo que no ha hecho (%r); lo desmiento.",
+                       " ".join(reply.split())[:120])
+        aviso = f"Aviso: en realidad {sin_hacer}. Pídemelo otra vez."
+    else:
+        return reply
+
     return f"{reply.rstrip()} {aviso}" if reply.strip() else aviso
 
 
@@ -73,13 +95,16 @@ def reply_turn(provider, conversation: Conversation, user_text: str, logger, *,
     falló (en ese caso deshace el turno de usuario y calla la voz).
     """
     conversation.add_user(user_text)
+    # Turno nuevo: lo del anterior ya no cuenta. Va aquí y no dentro de la rama
+    # de herramientas porque lo que se apunta (fallos, llamadas, registro) se
+    # consulta pase lo que pase, también si se cae al streaming.
+    if execute is not None and hasattr(execute, "reset"):
+        execute.reset()
 
     try:
         # Un proveedor con herramientas propias (Claude Code) no acepta las
         # nuestras: con él se va por la vía normal, que además va en streaming.
         if tools and execute is not None and getattr(provider, "accepts_tools", True):
-            if hasattr(execute, "reset"):
-                execute.reset()
             try:
                 reply = provider.run_tools_turn(
                     conversation.system_prompt, conversation.messages, tools, execute

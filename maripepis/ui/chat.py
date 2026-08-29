@@ -14,8 +14,15 @@ Tres cosas que conviene entender antes de tocarla:
   lanzarla por ruta sin depender de PYTHONPATH ni de cómo esté instalado el
   paquete. Lo único que comparte con el demonio es el protocolo: una línea JSON
   por evento (documentado en `hotkey/protocol.py`).
-* **Solo escucha.** Se suscribe al socket y pinta lo que llega; no manda órdenes.
-  Si el demonio se reinicia, se reengancha sola.
+* **Escucha por un sitio y habla por otro.** La conexión de `subscribe` es de
+  una sola dirección y se queda muda: el demonio no lee de ella, y usa justo eso
+  para enterarse de que la ventana se ha cerrado (lo único que puede llegar por
+  ahí es el EOF). El switch de motor, que sí manda una orden, abre una conexión
+  **aparte y corta** —igual que el cliente de la tecla—, y la cierra. Si el
+  demonio se reinicia, la ventana se reengancha sola.
+* **El botón de reiniciar no pasa por el demonio.** Va directo a systemd. Tiene
+  que ser así: cuando de verdad hace falta reiniciar es cuando el demonio no
+  contesta, y pedírselo a él sería justo lo que no funciona.
 
 A mano, para probarla:
 
@@ -41,6 +48,11 @@ gi.require_version("Gdk", "4.0")
 
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402  (gi exige require_version antes)
 
+# El vecino de al lado, no el paquete: al ejecutar un fichero por su ruta, Python
+# mete su directorio el primero en `sys.path`. Así la ventana sigue sin depender
+# de PYTHONPATH ni de cómo esté instalado maripepis.
+import marcado  # noqa: E402
+
 try:  # libadwaita da los colores del tema (acento, tarjetas) y el modo oscuro
     gi.require_version("Adw", "1")
     from gi.repository import Adw
@@ -55,17 +67,43 @@ PRGNAME = "maripepis-chat"      # solo el nombre del proceso (ps, journalctl)
 TITULO = "Maripepis · chat"
 
 MAX_MENSAJES = 200        # burbujas en pantalla; las viejas se van cayendo
+# Un fichero más largo que esto se abre plegado: cabe de sobra una lista de la
+# compra o una nota, y no se te va la conversación de la pantalla por un README.
+DOC_PLEGADO_LINEAS = 40
 RECONEXION_MIN = 1.0      # espera antes de reintentar la conexión (s)
 RECONEXION_MAX = 15.0
 
+# `processing` es transcribir y `thinking` es el LLM: dos esperas distintas, y
+# con Claude Code la segunda dura lo suyo. Un estado que no esté aquí se pinta
+# tal cual (`· loquesea`), así que una ventana vieja contra un demonio nuevo se
+# queda fea pero no se rompe.
 ESTADOS = {
     "loading": "⏳ arrancando…",
     "idle": "· en reposo",
     "recording": "🎙️ te escucho…",
-    "processing": "🧠 pensando…",
+    "processing": "✍️ transcribiendo…",
+    "thinking": "🧠 pensando…",
     "speaking": "🗣️ hablando…",
 }
 SIN_CONEXION = "⚠️ sin demonio"
+
+# El servicio de systemd que hay detrás (packaging/maripepis.service). Reiniciarlo
+# desde aquí sale bien porque la ventana se lanza con `uwsm-app`, fuera del cgroup
+# del servicio (ver la cabecera de `hotkey/window.py`): sin eso, el reinicio se
+# llevaría por delante a la propia ventana que lo ha pedido.
+UNIDAD = "maripepis.service"
+REINICIO_TIMEOUT = 20.0
+# Icono del botón. Símbolo del tema, no emoji: al lado de la ✕ de la cabecera,
+# el 🔄 sale plano y descolorido (y de otro tamaño).
+ICONO_REINICIAR = "view-refresh-symbolic"
+
+# El switch de la cabecera: apagado = local, encendido = nube. Los nombres son
+# los del protocolo; lo de al lado es lo que se lee, que «ollama» no le dice nada
+# a nadie a las ocho de la mañana.
+BACKEND_LOCAL = "ollama"
+BACKEND_NUBE = "claude"
+ROTULOS = {BACKEND_LOCAL: "🏠 local", BACKEND_NUBE: "☁️ Claude",
+           "claude-code": "☁️ Claude Code"}
 
 CSS = """
 .mp-mensajes { padding: 14px; }
@@ -95,6 +133,16 @@ CSS = """
 .mp-error { color: @error_color; font-size: 0.9em; }
 .mp-separador { font-size: 0.8em; opacity: 0.45; }
 .mp-estado { font-size: 0.85em; opacity: 0.75; }
+.mp-motor { font-size: 0.82em; opacity: 0.8; margin-right: 4px; }
+.mp-reiniciar { font-size: 1.05em; }
+.mp-documento {
+  background: @card_bg_color;
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+.mp-doc-titulo { font-size: 0.85em; opacity: 0.75; }
+.mp-doc-texto { font-size: 0.92em; }
+.mp-doc-crudo { font-family: monospace; font-size: 0.85em; }
 """
 
 
@@ -195,13 +243,84 @@ def devolver_foco(monitor: str) -> None:
 # ── la ventana ───────────────────────────────────────────────────────────
 
 
+def mandar(ruta: str, orden: dict, timeout: float = 3.0) -> dict:
+    """Manda UNA orden al demonio por una conexión propia y devuelve su respuesta.
+
+    Aparte de la de `subscribe` a propósito: aquella es de una dirección y el
+    demonio no lee de ella (ver la cabecera del módulo). Aquí se abre, se dice lo
+    que hay que decir, se lee la contestación y se cierra, como el cliente de la
+    tecla.
+
+    Nunca lanza: esto lo llama un hilo suelto y un fallo de socket no puede
+    tumbar la ventana. Lo que devuelve, si algo va mal, es un `ok: False` con el
+    motivo, que es lo que se pinta.
+    """
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(ruta)
+            s.sendall((json.dumps(orden, ensure_ascii=False) + "\n").encode())
+            crudo = s.recv(65536).decode("utf-8", "replace").strip()
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    try:
+        return json.loads(crudo.splitlines()[0]) if crudo else {"ok": False,
+                                                                "error": "sin respuesta"}
+    except (ValueError, IndexError):
+        return {"ok": False, "error": "respuesta ilegible"}
+
+
+def reiniciar_servicio(unidad: str = UNIDAD,
+                       timeout: float = REINICIO_TIMEOUT) -> tuple[bool, str]:
+    """Reinicia el demonio por systemd. Devuelve ``(salió_bien, motivo)``.
+
+    Nunca lanza, igual que `mandar`: lo llama un hilo suelto y un fallo aquí no
+    puede tumbar la ventana. El motivo se pinta en el hilo, que es donde se mira.
+
+    Se va a `systemctl` y no al socket a propósito (ver la cabecera del módulo).
+    Si Maripepis no corre como servicio —a mano, `python -m maripepis --daemon`—
+    esto falla y lo dice: es lo honrado, porque tampoco habría nada que reiniciar
+    desde aquí.
+    """
+    if not shutil.which("systemctl"):
+        return False, "no encuentro systemctl"
+    try:
+        fin = subprocess.run(  # noqa: S603 - argumentos propios, sin shell
+            ["systemctl", "--user", "restart", unidad],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"systemctl no terminó en {timeout:g}s"
+    except OSError as e:
+        return False, str(e)
+    if fin.returncode == 0:
+        return True, ""
+    motivo = " ".join((fin.stderr or fin.stdout or "").split())
+    return False, motivo or f"systemctl salió con código {fin.returncode}"
+
+
+def boton_reiniciar() -> Gtk.Button:
+    """El botón de reiniciar: icono del tema si lo hay, emoji si no.
+
+    Se pregunta antes en vez de confiar: si el tema de iconos no trae el símbolo,
+    GTK pinta el cuadro de «imagen rota», que es peor que el emoji.
+    """
+    display = Gdk.Display.get_default()
+    if display is not None:
+        tema = Gtk.IconTheme.get_for_display(display)
+        if tema.has_icon(ICONO_REINICIAR):
+            return Gtk.Button(icon_name=ICONO_REINICIAR)
+    return Gtk.Button(label="🔄")
+
+
 class Ventana(Gtk.ApplicationWindow):
     """La conversación, en burbujas, y el estado del demonio en la cabecera."""
 
-    def __init__(self, app, *, foco_previo: str = "") -> None:
+    def __init__(self, app, *, foco_previo: str = "", socket_path: str = "") -> None:
         super().__init__(application=app, title=TITULO)
         self.set_default_size(520, 760)
         self.foco_previo = foco_previo
+        self.socket_path = socket_path
 
         self._respuesta: Gtk.Label | None = None   # burbuja que se está escribiendo
         self._texto_respuesta = ""
@@ -218,6 +337,36 @@ class Ventana(Gtk.ApplicationWindow):
 
         cabecera = Gtk.HeaderBar()
         cabecera.set_title_widget(titulo)
+
+        # Reiniciar el demonio de un clic. Es lo que se acaba haciendo a mano en
+        # una terminal: cuando se cuelga, y cuando se toca `config.toml` (que solo
+        # se lee al arrancar). A la izquierda, que la derecha ya es del switch.
+        # No se apaga al perder la conexión —a diferencia del switch— porque sin
+        # demonio es justo cuando sirve para algo.
+        self.reiniciar = boton_reiniciar()
+        self.reiniciar.add_css_class("flat")
+        self.reiniciar.add_css_class("mp-reiniciar")
+        self.reiniciar.set_tooltip_text(
+            f"Reiniciar Maripepis (systemctl --user restart {UNIDAD})")
+        self.reiniciar.connect("clicked", self._al_reiniciar)
+        cabecera.pack_start(self.reiniciar)
+
+        # El switch de motor: local ⇄ Claude, de un clic. Empieza apagado y sin
+        # poder tocarse; lo activa el `hello` del demonio, que es quien sabe en
+        # qué motor está de verdad. Así no se puede mandar una orden a ciegas
+        # antes de que haya con quién hablar.
+        self.motor = Gtk.Label(label=ROTULOS[BACKEND_LOCAL])
+        self.motor.add_css_class("mp-motor")
+        self.switch = Gtk.Switch()
+        self.switch.set_valign(Gtk.Align.CENTER)
+        self.switch.set_tooltip_text("Cambiar entre el modelo local y Claude")
+        self.switch.set_sensitive(False)
+        self._switch_id = self.switch.connect("notify::active", self._al_cambiar_motor)
+        caja_motor = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        caja_motor.append(self.motor)
+        caja_motor.append(self.switch)
+        cabecera.pack_end(caja_motor)
+
         self.set_titlebar(cabecera)
 
         self.hilo = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -314,6 +463,46 @@ class Ventana(Gtk.ApplicationWindow):
         etiqueta.set_halign(Gtk.Align.START)
         self._añadir(etiqueta)
 
+    def documento(self, ruta: str, contenido: str) -> None:
+        """Un fichero recién escrito, plegable, con el Markdown ya pintado.
+
+        Va del lado de Maripepis y en su propia tarjeta, no en una burbuja: no es
+        algo que haya dicho, es algo que ha dejado en el disco. El título de la
+        cabecera es lo que queda cuando se pliega, así que lleva el nombre y el
+        tamaño: plegado tiene que seguir diciendo qué hay ahí dentro.
+        """
+        lineas = contenido.count("\n") + 1
+        nombre = ruta.rsplit("/", 1)[-1] or ruta
+        titulo = Gtk.Label(
+            label=f"📄 {nombre} · {lineas} línea{'s' if lineas != 1 else ''}",
+            xalign=0, tooltip_text=ruta,
+        )
+        titulo.add_css_class("mp-doc-titulo")
+
+        cuerpo = Gtk.Label(wrap=True, selectable=True, xalign=0)
+        cuerpo.set_max_width_chars(46)
+        if marcado.parece_markdown(ruta):
+            # `use_markup` con marcado roto deja la etiqueta EN BLANCO; por eso
+            # `a_pango` promete no devolverlo nunca (ver `ui/marcado.py`).
+            cuerpo.set_markup(marcado.a_pango(contenido))
+            cuerpo.add_css_class("mp-doc-texto")
+        else:
+            # Un script o un .txt se enseñan tal cual: interpretar sus `#` y sus
+            # `*` como Markdown sería inventarse un formato que no tiene.
+            cuerpo.set_text(contenido)
+            cuerpo.add_css_class("mp-doc-crudo")
+
+        plegable = Gtk.Expander()
+        plegable.set_label_widget(titulo)
+        plegable.set_child(cuerpo)
+        plegable.set_expanded(lineas <= DOC_PLEGADO_LINEAS)
+
+        caja = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        caja.add_css_class("mp-documento")
+        caja.set_halign(Gtk.Align.START)
+        caja.append(plegable)
+        self._añadir(caja)
+
     def suelto(self, texto: str, clase: str) -> None:
         """Una línea centrada y discreta: avisos, errores, separadores."""
         etiqueta = Gtk.Label(label=texto, wrap=True, xalign=0.5)
@@ -325,11 +514,98 @@ class Ventana(Gtk.ApplicationWindow):
         self._respuesta = None
         self._texto_respuesta = ""
 
+    # ── el switch de motor ───────────────────────────────────────────────
+
+    def _pintar_motor(self, backend: str, etiqueta: str = "") -> None:
+        """Deja el switch como está el demonio, SIN mandar nada.
+
+        El `notify::active` salta lo mismo si lo mueve una persona que si lo
+        mueve el código, así que aquí se desconecta la señal mientras se coloca:
+        sin eso, sincronizar la ventana con el demonio mandaría una orden de
+        vuelta, y dos ventanas abiertas se pondrían a rebotarse el motor.
+        """
+        self.switch.handler_block(self._switch_id)
+        self.switch.set_active(backend != BACKEND_LOCAL)
+        self.switch.handler_unblock(self._switch_id)
+        self.switch.set_sensitive(True)
+        self.motor.set_text(ROTULOS.get(backend, f"· {backend}"))
+        if etiqueta:
+            self.motor.set_tooltip_text(etiqueta)
+
+    def _al_cambiar_motor(self, *_a) -> None:
+        """Alguien ha tocado el switch: se pide el cambio y se espera respuesta.
+
+        La petición va en un hilo aparte porque escribe en un socket y lee: aquí
+        estamos en el hilo de GTK, y bloquearlo congela la ventana entera —justo
+        mientras el demonio arranca un proveedor, que es cuando más tarda—.
+        """
+        destino = BACKEND_NUBE if self.switch.get_active() else BACKEND_LOCAL
+        self.switch.set_sensitive(False)
+        self.motor.set_text("· cambiando…")
+        threading.Thread(target=self._pedir_motor, args=(destino,), daemon=True).start()
+
+    def _pedir_motor(self, destino: str) -> None:
+        """El viaje al demonio, fuera del hilo de GTK."""
+        resp = mandar(self.socket_path, {"cmd": "backend", "value": destino})
+        GLib.idle_add(self._respuesta_motor, destino, resp)
+
+    def _respuesta_motor(self, destino: str, resp: dict) -> bool:
+        """Lo que conteste el demonio manda: si dijo que no, el switch vuelve.
+
+        Que es lo importante de todo esto. El backend `claude` necesita
+        ANTHROPIC_API_KEY y sin ella no se puede construir; dejar el switch
+        encendido «porque lo has pulsado» sería enseñar un motor que no está en
+        uso, y a la primera pregunta contestaría el de siempre.
+        """
+        if resp.get("ok"):
+            self._pintar_motor(resp.get("backend", destino))
+        else:
+            self._pintar_motor(resp.get("backend", BACKEND_LOCAL))
+            self.suelto(f"⚠️ {resp.get('error') or 'no he podido cambiar de motor'}",
+                        "mp-error")
+        return False
+
+    # ── el botón de reiniciar ────────────────────────────────────────────
+
+    def _al_reiniciar(self, *_a) -> None:
+        """Un clic y el demonio vuelve a arrancar; la ventana se reengancha sola.
+
+        El viaje va en un hilo aparte por lo mismo que el del switch: `systemctl`
+        bloquea hasta que systemd acepta el trabajo, y el hilo de GTK no se puede
+        parar sin congelar la ventana. El botón se apaga mientras tanto, que si no
+        cuatro clics nerviosos son cuatro reinicios encadenados.
+        """
+        self.reiniciar.set_sensitive(False)
+        self.estado.set_text("🔄 reiniciando…")
+        self._cerrar_respuesta()
+        # El demonio arranca con la conversación en blanco: la marca deja claro
+        # que lo de arriba ya no es contexto de nadie.
+        self.suelto("— reiniciando Maripepis —", "mp-separador")
+        threading.Thread(target=self._pedir_reinicio, daemon=True).start()
+
+    def _pedir_reinicio(self) -> None:
+        """El viaje a systemd, fuera del hilo de GTK."""
+        bien, motivo = reiniciar_servicio()
+        GLib.idle_add(self._respuesta_reinicio, bien, motivo)
+
+    def _respuesta_reinicio(self, bien: bool, motivo: str) -> bool:
+        """Se vuelve a encender el botón pase lo que pase.
+
+        Si salió bien no se pinta nada: el `hello` de la reconexión ya cuenta el
+        estado nuevo, y decir «reiniciado» aquí sería cantar victoria antes de que
+        el demonio conteste (que es lo único que lo demuestra).
+        """
+        self.reiniciar.set_sensitive(True)
+        if not bien:
+            self.suelto(f"⚠️ no he podido reiniciar: {motivo}", "mp-error")
+        return False
+
     # ── eventos del demonio ──────────────────────────────────────────────
 
     def al_enlace(self, vivo: bool) -> bool:
         if not vivo:
             self.estado.set_text(SIN_CONEXION)
+            self.switch.set_sensitive(False)   # sin demonio no hay a quién pedírselo
             self._cerrar_respuesta()
         return False  # GLib.idle_add: no repetir
 
@@ -339,6 +615,8 @@ class Ventana(Gtk.ApplicationWindow):
 
         if tipo == "hello":
             self._estado(ev)
+            self._pintar_motor(str(ev.get("backend") or BACKEND_LOCAL),
+                               str(ev.get("backend_label") or ""))
             # Solo la primera vez: al reconectar ya está pintada y duplicarla
             # sería contar la conversación dos veces.
             if self._mensajes == 0:
@@ -353,6 +631,8 @@ class Ventana(Gtk.ApplicationWindow):
             self.burbuja(texto, yo=True)
         elif tipo == "tool":
             self.comando(texto, salio=bool(ev.get("ok", True)))
+        elif tipo == "document":
+            self.documento(str(ev.get("path") or ""), texto)
         elif tipo == "delta":
             if self._respuesta is None:
                 self._respuesta = self.burbuja("", yo=False)
@@ -368,6 +648,12 @@ class Ventana(Gtk.ApplicationWindow):
             self._cerrar_respuesta()
         elif tipo == "reset":
             self.suelto("— conversación nueva —", "mp-separador")
+        elif tipo == "backend":
+            # Puede venir de otra ventana o de `maripepis-hotkey backend claude`.
+            self._pintar_motor(str(ev.get("backend") or BACKEND_LOCAL),
+                               str(ev.get("backend_label") or ""))
+            if texto:
+                self.suelto(texto, "mp-aviso" if ev.get("ok") else "mp-error")
         elif tipo == "notice":
             self.suelto(texto, "mp-aviso")
         elif tipo == "error":
@@ -430,7 +716,7 @@ def main(argv: list[str] | None = None) -> int:
         ventana = estado.get("ventana")
         if ventana is None:
             estilo()
-            ventana = Ventana(app, foco_previo=foco)
+            ventana = Ventana(app, foco_previo=foco, socket_path=ruta)
             hilo = Eventos(ruta, ventana.al_evento, ventana.al_enlace)
             hilo.start()
             estado["ventana"], estado["hilo"] = ventana, hilo

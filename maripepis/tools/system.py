@@ -10,8 +10,9 @@ import urllib.parse
 from pathlib import Path
 
 from .base import Tool
+from .busqueda import build_weather_tool, buscar_texto
 from .carpetas import resolver
-from .ficheros import build_file_tool
+from .ficheros import build_file_tool, build_read_tool
 from .shell import build_shell_tool
 
 log = logging.getLogger("maripepis.tools")
@@ -102,14 +103,34 @@ def abrir_navegador(args: dict) -> str:
 
 
 def buscar_en_internet(args: dict) -> str:
+    """Busca y **devuelve el texto**; solo abre el navegador si no encuentra nada.
+
+    El orden importa. Antes esto abría una pestaña y devolvía «he buscado X»: al
+    modelo no le llegaba ningún dato, así que no podía contestar a lo que se le
+    había preguntado, y se lo inventaba. Ahora la pestaña es el último recurso, y
+    cuando toca abrirla se dice claramente que no se traen los datos, para que no
+    se ponga a responder como si los tuviera.
+    """
     consulta = (args.get("consulta") or args.get("query") or "").strip()
     if not consulta:
         return "¿Qué quieres que busque?"
+
+    texto = buscar_texto(consulta)
+    if texto:
+        return (
+            f"Esto he encontrado sobre «{consulta}»:\n{texto}\n"
+            "Contéstale con esto, resumido en una o dos frases."
+        )
+
     if shutil.which("xdg-open") is None:
         return "NO he buscado nada: no encuentro `xdg-open` en este equipo."
     url = "https://duckduckgo.com/?q=" + urllib.parse.quote_plus(consulta)
     _launch(["xdg-open", url])
-    return f"He buscado «{consulta}» en el navegador."
+    return (
+        f"NO he podido traerme los resultados de «{consulta}»: te he abierto la "
+        "búsqueda en el navegador para que la mire el usuario. Díselo así, y NO "
+        "contestes a lo que preguntaba como si lo supieras."
+    )
 
 
 def abrir_aplicacion(args: dict) -> str:
@@ -174,9 +195,13 @@ def build_default_tools(tools_cfg: dict | None = None) -> list[Tool]:
         Tool(
             name="buscar_en_internet",
             description=(
-                "Busca información en internet y abre los resultados en el navegador. "
-                "Úsala siempre que el usuario quiera buscar, mirar o consultar algo online: "
-                "noticias, datos, horarios, precios, el tiempo, cómo hacer algo, etc."
+                "Busca información en internet y te DEVUELVE el texto de lo que "
+                "encuentre, para que puedas contestar con datos de verdad. Úsala "
+                "cuando el usuario quiera consultar algo: quién es alguien, qué es "
+                "una cosa, cuánto mide, datos de un sitio, etc. "
+                "Fíjate en lo que devuelve: si dice que NO ha podido traerse los "
+                "resultados, dilo, no contestes como si los supieras. "
+                "Para el tiempo no la uses: para eso está consultar_tiempo."
             ),
             parameters={
                 "type": "object",
@@ -219,13 +244,15 @@ def build_default_tools(tools_cfg: dict | None = None) -> list[Tool]:
             },
             handler=abrir_aplicacion,
         ),
+        build_weather_tool(),
     ]
 
-    # Escribir ficheros y la shell van juntas: las dos tocan tus cosas, así que
-    # las dos se quitan de en medio con `[tools.shell] enabled = false`.
+    # Leer y escribir ficheros van con la shell: las tres tocan tus cosas, así que
+    # las tres se quitan de en medio con `[tools.shell] enabled = false`.
     shell_cfg = (tools_cfg or {}).get("shell", {})
     if shell_cfg.get("enabled", True):
         tools.append(build_file_tool())
+        tools.append(build_read_tool())
         tools.append(build_shell_tool(shell_cfg))
 
     return tools

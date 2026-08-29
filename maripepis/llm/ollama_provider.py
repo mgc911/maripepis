@@ -9,10 +9,32 @@ from collections.abc import Iterator
 
 import httpx
 
+from ..veracidad import anuncia_sin_hacer, falta_llamar, lo_que_no_ha_hecho
 from .base import LLMProvider
 
 log = logging.getLogger("maripepis.ollama")
 
+# Dos y no una: a la primera el modelo suele reaccionar, pero llamando a la
+# herramienta equivocada (vuelve a mirar el tiempo en vez de escribir). A partir
+# de la tercera ya es dar vueltas, y el turno se cierra con el desmentido.
+_MAX_EMPUJONES = 2
+
+
+def _empujon(faltan: set[str]) -> str:
+    """Lo que se le dice para que haga lo que ha dado por hecho."""
+    if faltan:
+        cuales = " o ".join(sorted(faltan))
+        return (
+            f"NO está hecho: no has llamado a {cuales}. Llama AHORA a {cuales}, en "
+            "este mismo turno, y a ninguna otra: los datos ya los tienes. Si el "
+            'fichero existe, usa modo="sobrescribir" con el texto entero. Nada de '
+            "contarme lo que vas a hacer ni de darlo por hecho."
+        )
+    return (
+        "No has llamado a ninguna herramienta, así que eso NO está hecho. Hazlo "
+        "AHORA, en este mismo turno, con la herramienta que haga falta. No me "
+        "cuentes lo que vas a hacer: hazlo, y luego dime cómo ha quedado."
+    )
 
 class OllamaProvider(LLMProvider):
     def __init__(
@@ -82,12 +104,19 @@ class OllamaProvider(LLMProvider):
                 "¿Está corriendo `ollama serve`?"
             ) from e
 
-    def run_tools_turn(self, system, messages, tools, execute, max_iters: int = 5) -> str:
+    def run_tools_turn(self, system, messages, tools, execute, max_iters: int = 8) -> str:
+        """El turno con herramientas: llamar, ejecutar, volver, hasta que remate.
+
+        Ocho vueltas y no cinco porque una petición normal ya encadena tres
+        (mirar el tiempo, leer el fichero, escribirlo) y el modelo gasta alguna
+        más corrigiéndose: con cinco, el turno se acababa a mitad de frase.
+        """
         msgs: list[dict] = [{"role": "system", "content": system}, *messages]
         ollama_tools = [t.to_ollama() for t in tools]
         nombres = {t.name for t in tools}
         texto = ""
         mudos = 0
+        empujones = 0
 
         for intento in range(max_iters):
             r = httpx.post(
@@ -130,6 +159,22 @@ class OllamaProvider(LLMProvider):
                     mudos += 1
                     log.warning("Respuesta vacía de %s; lo intento otra vez.", self.model)
                     continue
+                # El turno se acaba dejando el trabajo a medias, de dos maneras:
+                # anunciando lo que hará («ahora voy a actualizarlo») o dándolo por
+                # hecho sin haber llamado a la herramienta («te lo he guardado»).
+                # Desmentirlo luego en voz alta es el último recurso; lo que de
+                # verdad arregla el turno es insistirle aquí, que casi siempre lo
+                # hace a la segunda. Una vez y solo una: más es dar vueltas.
+                if empujones < _MAX_EMPUJONES and intento + 1 < max_iters:
+                    pendiente = lo_que_no_ha_hecho(texto, execute)
+                    if pendiente or anuncia_sin_hacer(texto):
+                        empujones += 1
+                        log.info("El turno se quedaba a medias (%s); le insisto (%d).",
+                                 pendiente or "solo anunciaba la acción", empujones)
+                        msgs.append({"role": "assistant", "content": texto})
+                        msgs.append({"role": "user", "content": _empujon(
+                            falta_llamar(texto, execute))})
+                        continue
                 break
             msgs.append(message)  # turno del asistente con las llamadas
             for tc in tool_calls:
@@ -143,8 +188,38 @@ class OllamaProvider(LLMProvider):
                         args = {}
                 result = execute(name, args)
                 msgs.append({"role": "tool", "content": result, "tool_name": name})
+        else:
+            # Se acabaron las vueltas con el modelo todavía llamando a
+            # herramientas. Lo que hay en `texto` es medio turno («el contenido
+            # del fichero es el siguiente:») y no una respuesta: se le pide el
+            # cierre sin herramientas, para que cuente lo que ya ha hecho en vez
+            # de dejar la frase colgada.
+            log.info("Turno agotado tras %d vueltas; pido el cierre.", max_iters)
+            texto = self._cerrar_el_turno(msgs) or texto
 
         return texto or "No he podido terminar la acción; inténtalo otra vez."
+
+    def _cerrar_el_turno(self, msgs: list[dict]) -> str:
+        """Una última petición SIN herramientas: que resuma lo que acaba de hacer."""
+        remate = {
+            "role": "user",
+            "content": ("Resume en una o dos frases lo que acabas de hacer, según lo que "
+                        "han devuelto las herramientas. No llames a ninguna más, y no "
+                        "digas que has hecho nada que no salga en esos resultados."),
+        }
+        try:
+            r = httpx.post(
+                f"{self.host}/api/chat",
+                json={"model": self.model, "messages": [*msgs, remate],
+                      "stream": False, "options": self._options()},
+                timeout=self.timeout,
+            )
+            if r.status_code != 200:
+                return ""
+            return (r.json().get("message", {}).get("content") or "").strip()
+        except (httpx.HTTPError, ValueError) as e:
+            log.warning("No pude cerrar el turno agotado: %s", e)
+            return ""
 
 
 def rescatar_llamadas(texto: str, nombres: set[str]) -> tuple[list[dict], str]:

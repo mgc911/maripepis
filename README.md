@@ -151,7 +151,7 @@ pulsa **Ctrl-C** para terminar. Ajusta la sensibilidad en `config.toml`:
 > El ciclo es secuencial (escucha → responde → escucha), así el micro no capta
 > la voz del asistente. Interrumpir hablando (*barge-in*) llegaría en una Fase 5.
 
-## Acciones: abrir apps, buscar en internet y ejecutar comandos
+## Acciones: abrir apps, buscar, leer y escribir ficheros, ejecutar comandos
 
 Con `[tools] enabled = true` (por defecto), el asistente puede **ejecutar
 acciones** cuando se lo pides — el LLM decide cuándo (tool-calling):
@@ -159,10 +159,14 @@ acciones** cuando se lo pides — el LLM decide cuándo (tool-calling):
 - *"Abre el navegador"* → abre el navegador (`xdg-open`).
 - *"Abre Firefox"* / *"Abre el gestor de archivos"* → lanza la aplicación.
 - *"Abre una terminal en Documentos"* → la abre **en esa carpeta**.
-- *"Busca el tiempo en Madrid"* / *"Mira recetas de tortilla"* → abre la búsqueda.
+- *"¿Quién inventó el teléfono?"* → lo **busca y te lo cuenta**, con el texto que
+  ha encontrado (no te abre una pestaña y se calla).
+- *"¿Qué tiempo va a hacer en Alicante?"* → el parte **de verdad**, hasta 3 días.
 - *"Créame una carpeta fotos"* / *"¿cuánto espacio me queda?"* → lo **hace** con zsh.
 - *"Guárdame una nota con la lista de la compra"* → **escribe el fichero**, con lo
   que le hayas dictado dentro.
+- *"Revisa el resumen que me hiciste y actualízalo"* → lo **lee**, y lo reescribe
+  con lo que haya que cambiar.
 - *"¿Cuánto es 7×8?"* / *"capital de Italia"* → responde directo, sin abrir nada.
 
 Hace las cosas en vez de explicarte cómo hacerlas: si te pide algo que puede
@@ -199,6 +203,15 @@ hablando, y sin ver la pantalla, no hay forma de distinguirlo. Maripepis se qued
 con lo que la herramienta hizo de verdad y añade un aviso cuando la respuesta no
 lo reconoce.
 
+**Y si no ha hecho nada, también.** Hay una mentira peor que esa, y es la que
+sale en una conversación larga: el modelo **no llama a ninguna herramienta** y
+narra el éxito igual («he actualizado el archivo»). No hay ningún fallo que
+enseñar, porque no se llegó a intentar nada, y el fichero se queda como estaba.
+Maripepis cuenta las llamadas del turno: si son cero y la respuesta presume de
+haber hecho algo, lo desmiente en voz alta. Y si el modelo se queda en el anuncio
+(*«ahora voy a actualizarlo»*) sin llegar a llamar, le insiste una vez antes de
+dar el turno por terminado.
+
 > **Requiere un LLM con tool-calling.** Por defecto usa **`qwen2.5:7b`** (fiable
 > y bueno en español). `llama3.1:8b` también lo hace, pero **sobre-dispara**
 > (abre el navegador para cualquier pregunta). Con Claude también funciona.
@@ -220,7 +233,70 @@ directorio del servicio.
 > Con `follow_mouse = 1` eso es **donde esté el ratón**, que no siempre es donde
 > estás mirando. Si te sale en la otra pantalla, es eso.
 
-### Escribir ficheros
+### Cambiar de motor con un clic
+
+La ventana de chat lleva un **switch en la cabecera**: apagado es el modelo local
+(`🏠 local`, Ollama), encendido es `☁️ Claude`. Cambia el motor **en caliente**,
+sin reiniciar el servicio y **sin perder la conversación** —el historial es
+neutro, así que se sigue por donde ibas pero con el otro modelo—.
+
+Lo mismo desde la terminal, que para eso es una orden del protocolo:
+
+```bash
+maripepis-hotkey backend claude       # o: ollama | claude-code
+maripepis-hotkey status               # dice en cuál está
+```
+
+Tres detalles que importan:
+
+- **Si el motor nuevo no se puede montar, no se cambia.** El backend `claude`
+  necesita `ANTHROPIC_API_KEY`; sin ella el proveedor ni llega a existir, el
+  switch vuelve solo a su sitio y la ventana te dice por qué. Antes esto se
+  descubría al hablar, que es justo cuando no estás mirando la pantalla.
+- **A mitad de turno, no.** Si está grabando o pensando, la orden devuelve
+  «ocupado» y el motor se queda como está.
+- **Todas las ventanas se enteran.** El cambio viaja como evento, así que si
+  tienes dos abiertas (o lo cambias por terminal) los switches se ponen de
+  acuerdo solos.
+
+> Con `claude` (API) mantienes **todas** las herramientas de maripepis, y se paga
+> por token. Con `claude-code` usas tu suscripción sin clave, pero ese backend
+> trae las suyas y las de `[tools]` no le llegan: pasa a ser conversación a
+> secas, salvo que le des las de Claude Code (ver arriba).
+
+**`🧠 pensando…` es un estado de verdad, no un adorno.** Con Ollama la respuesta
+empieza en décimas y daba igual dar por hecho que ya estaba hablando; Claude Code
+piensa y se va a internet **antes** de abrir la boca, y eso son diez o treinta
+segundos. Así que el salto a `🗣️ hablando…` lo dispara el primer trozo de
+respuesta, no el principio del turno, y por el camino se van pintando las
+herramientas que usa (`⚙️ WebSearch · tiempo Sevilla mañana`, y en rojo las que
+fallan). Sin eso, un turno con búsqueda era medio minuto de ventana congelada
+diciendo que hablaba, que es exactamente lo que se ve cuando algo se ha colgado.
+
+Se puede interrumpir mientras piensa, no solo mientras habla: **ALT+Z** corta el
+turno igual.
+
+### Buscar en internet
+
+`buscar_en_internet` **te devuelve el texto** de lo que encuentra, para que el
+asistente pueda contestar con datos y no con una pestaña abierta. Antes solo
+lanzaba `xdg-open` y devolvía «he buscado X»: al modelo no le llegaba ni una
+palabra, así que ante *"busca el tiempo y apúntamelo en un fichero"* no podía
+hacer nada — y en vez de decirlo, escribía el fichero con los días en blanco.
+
+Tira de dos fuentes sin clave ni registro: la **respuesta directa de DuckDuckGo**
+(acierta con nombres propios exactos) y la **Wikipedia en español** (que cubre
+quién, qué, cuánto y dónde). Si ninguna sabe nada, entonces sí abre la búsqueda
+en el navegador —y **lo dice claramente**, para que el modelo no conteste como si
+tuviera los datos.
+
+> **No hay búsqueda web general, y no por pereza: no la hay gratis.** DuckDuckGo
+> (`html` y `lite`), SearXNG y Mojeek contestan con un captcha a todo lo que no
+> sea un navegador de carne y hueso, y el resto pide clave de API. Si quieres una
+> búsqueda web de verdad, hace falta darse de alta en algo (Brave Search o Serper
+> tienen plan gratuito) y meter la clave en la configuración.
+
+### Escribir y leer ficheros
 
 `escribir_fichero` crea un fichero de texto con lo que le dictes, o le añade
 texto al final. Existe porque hacerlo con `echo … > fichero` es un campo de minas
@@ -233,6 +309,24 @@ abría un editor para que lo escribieras tú.
   *notitas* para perder algo.
 - Va con `[tools.shell] enabled`: las dos tocan tus ficheros, las dos se quitan
   juntas.
+
+Y su otra mitad, `leer_fichero`, que es la que hace posible *"revisa el documento
+que me hiciste"*. Sin ella el modelo no ve el disco: de un turno anterior solo le
+queda su propia frase («he creado el archivo»), sin la ruta ni el contenido, así
+que antes que reconocerlo se inventaba lo que ponía y te aseguraba que lo había
+corregido. Ahora lee de verdad antes de reescribir, y en el historial queda
+apuntado **lo que las herramientas hicieron**, no lo que el modelo dijo que había
+hecho. Recorta a 4000 caracteres (lo que lee viaja en cada petición siguiente) y
+no toca binarios.
+
+### El tiempo
+
+`consultar_tiempo` da el parte de ahora y hasta **3 días**, con temperaturas,
+cielo, lluvia y viento, y el detalle cada tres horas si lo pides. Sale de
+[wttr.in](https://wttr.in), en español y sin clave ni registro. Está aparte de la
+búsqueda porque es de lo que más se pregunta hablando y porque la enciclopedia no
+sabe qué tiempo hará el jueves. Más de tres días no hay: si pides «la semana», lo
+dice en vez de rellenar el resto.
 
 ### Comandos de zsh
 
@@ -423,7 +517,7 @@ Piper (`[tts].voice` es una ruta relativa).
 
 Al pulsar **ALT+Z** se abre sola una ventana con la conversación: lo que ha
 entendido, los comandos que ha ejecutado, lo que ha contestado y en qué anda
-(`🎙️ te escucho…`, `🧠 pensando…`, `🗣️ hablando…`). Las notificaciones de mako se van a los pocos segundos; esto se
+(`🎙️ te escucho…`, `✍️ transcribiendo…`, `🧠 pensando…`, `🗣️ hablando…`). Las notificaciones de mako se van a los pocos segundos; esto se
 queda, que es justo lo que hace falta cuando te dice una dirección o una cifra.
 
 No se escribe en ella: se habla. Y **no roba el foco**, así que puedes seguir
@@ -448,6 +542,67 @@ Aunque lleve `no_initial_focus`, abrir una ventana en el otro monitor mueve el
 **monitor activo** y deja el teclado sin ventana enfocada: por eso el visor mira
 qué monitor tenías antes y le devuelve el foco al aparecer (`--no-restore-focus`
 lo desactiva).
+
+### El fichero, dentro del chat
+
+Cuando le pides que te genere un archivo —o que te lea uno— no se queda en un «ya
+lo tienes en Documentos»: **el fichero entero aparece en la conversación**, con el
+Markdown pintado (títulos, negritas, listas, código, enlaces) y en una tarjeta que
+se **pliega y despliega** de un clic. Vale para las dos mitades: ver lo que acaba
+de escribir, y «enséñame el resumen que me hiciste».
+
+- **Se abre desplegado** si cabe (hasta 40 líneas) y **plegado** si no, para que
+  un README no te eche la conversación de la pantalla. Plegado, la cabecera sigue
+  diciendo qué hay: `📄 compra.md · 18 líneas`.
+- **Solo se pinta como Markdown lo que lo es** (`.md`, `.markdown`). Un `.py` o un
+  `.txt` van tal cual, en monoespaciada: interpretar sus `#` como títulos sería
+  inventarle un formato que no tiene.
+- **Se relee del disco**, no se reutiliza lo que se le pasó a la herramienta. En
+  modo «añadir» ese argumento son solo las líneas nuevas, y lo que quieres ver es
+  el fichero.
+- **El texto no vuelve al modelo**: viaja por el socket y se pinta, nada más. Para
+  que el modelo lea un fichero está `leer_fichero`.
+
+De qué ficheros se entera:
+
+| Motor | Cómo llega al fichero | ¿Se ve? |
+|---|---|---|
+| `ollama` / `claude` | `escribir_fichero`, `leer_fichero` | sí |
+| `ollama` / `claude` | `ejecutar_comando` con `echo … > x` o `cat x` | no |
+| `claude-code` | su `Write`, `Edit`, `Read` | sí |
+| `claude-code` | su `Bash` con `cat > x << EOF` o `cat x` | no |
+
+Los dos «no» son el mismo motivo: de un comando de shell no hay forma de saber
+con qué fichero anda sin ponerse a interpretar redirecciones, y equivocarse ahí es
+enseñar un documento que no es. Por eso, con `claude-code`, el proveedor le añade
+al system prompt que use `Write` y `Read` en vez de Bash —sin esa nota escribía
+con un `cat > … << EOF`, medido— y `[llm.claude_code] tools` lleva las dos.
+Quitarlas de esa lista no le impide leer ni escribir (Bash ya puede): lo único que
+pierdes es ver el fichero en el chat.
+
+### Reiniciar de un clic
+
+A la izquierda de la cabecera hay un botón (↻) que **reinicia Maripepis**: hace
+`systemctl --user restart maripepis` y ya. Es para las dos veces que se acaba
+abriendo una terminal:
+
+- cuando has tocado `config.toml` (el demonio solo lo lee **al arrancar**: cambiar
+  de modelo de Whisper, de voz de Piper o de `[tools]` pide reinicio);
+- cuando se ha quedado colgado y no contesta.
+
+Justo por lo segundo **no habla con el demonio, habla con systemd**: pedirle a un
+proceso atascado que se reinicie es lo que no iba a funcionar. Por eso el botón
+sigue activo aunque la cabecera diga `⚠️ sin demonio`, que es cuando más falta
+hace.
+
+La ventana **no se cierra**: se lanza con `uwsm-app`, fuera del cgroup del
+servicio, así que sobrevive al reinicio y se reengancha sola en cuanto el demonio
+vuelve a abrir el socket. Lo que sí se pierde es la conversación —el demonio
+arranca en blanco—, y por eso queda escrito un `— reiniciando Maripepis —` en el
+hilo: lo de arriba ya no es contexto de nadie.
+
+Si Maripepis no corre como servicio (a mano, `python -m maripepis --daemon`), el
+botón lo dice en el hilo en vez de fingir que ha hecho algo.
 
 ### Cómo está montada
 

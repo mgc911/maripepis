@@ -120,3 +120,23 @@ def test_el_resumen_no_ocupa_media_ventana():
     largo = resumen_de_la_llamada("ejecutar_comando", {"comando": "echo " + "x" * 500})
     assert len(largo) < 200
     assert largo.endswith("…")
+
+
+def test_sabe_que_herramientas_salieron_bien(log):
+    acciones = Acciones([_tool("consultar_tiempo", "Parte de wttr.in: soleado."),
+                         _tool("escribir_fichero", "NO he escrito nada: ya existe.")], log)
+    acciones("consultar_tiempo", {})
+    acciones("escribir_fichero", {})
+
+    # La que falló no cuenta como hecha: es justo la que el modelo dirá que hizo.
+    assert acciones.herramientas_ok() == {"consultar_tiempo"}
+
+
+def test_las_instrucciones_para_el_modelo_no_se_dicen_en_voz_alta():
+    # Antes se cortaba por una lista de frases, y el usuario acabó oyendo
+    # «vuelve a llamarme en modo sobrescribir con el texto entero ya cor».
+    from maripepis.tools.base import MARCA_MODELO
+
+    largo = (f"NO he escrito nada: /home/manu/x.txt ya existe.{MARCA_MODELO} "
+             'Repite AHORA esta misma llamada añadiendo modo="sobrescribir".')
+    assert resumen_del_fallo(largo) == "/home/manu/x.txt ya existe"

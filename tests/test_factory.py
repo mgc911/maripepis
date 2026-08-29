@@ -43,3 +43,24 @@ def test_construye_claude_code(monkeypatch):
 def test_backend_desconocido():
     with pytest.raises(ValueError):
         build_provider(_cfg("gpt-9"))
+
+
+def test_claude_sin_clave_no_llega_a_existir(monkeypatch):
+    # El SDK se construye sin clave y no protesta hasta la primera petición: con
+    # el switch de la ventana eso significa ponerse en «Claude» y enterarte al
+    # hablar, que es cuando no estás mirando la pantalla.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
+    from maripepis.llm.claude_provider import ClaudeProvider
+
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        ClaudeProvider()
+
+
+def test_claude_con_clave_se_construye(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-loquesea")
+
+    from maripepis.llm.claude_provider import ClaudeProvider
+
+    assert "claude" in ClaudeProvider().label.lower()

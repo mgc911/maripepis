@@ -15,15 +15,19 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
+from pathlib import Path
 
-from .base import Tool, es_fallo
+from .base import MARCA_MODELO, Tool, es_fallo
+from .carpetas import resolver_ruta
 
 # El argumento que de verdad cuenta de cada herramienta: lo que hay que enseñar
 # es «mkdir -p ~/fotos», no el JSON entero de la llamada.
 _ARGUMENTO_PRINCIPAL = {
     "ejecutar_comando": "comando",
     "escribir_fichero": "ruta",
+    "leer_fichero": "ruta",
     "buscar_en_internet": "consulta",
+    "consultar_tiempo": "lugar",
     "abrir_aplicacion": "nombre",
     "abrir_navegador": "url",
 }
@@ -46,8 +50,14 @@ class Acciones:
         self.on_call = on_call
         #: Motivo del último fallo sin arreglar, o ``None`` si lo último salió bien.
         self.ultimo_fallo: str | None = None
-        #: Cuántas herramientas se han llamado en este turno.
+        #: Cuántas herramientas se han llamado en este turno. Cero con el modelo
+        #: cantando victoria es la mentira más difícil de pillar: no hay ningún
+        #: fallo que enseñar porque no se llegó a intentar nada.
         self.llamadas = 0
+        #: Las llamadas del turno, ``(nombre, args, resultado)``. De aquí sale
+        #: `herramientas_ok()`, que es lo que permite desmentir al modelo cuando
+        #: dice haber guardado algo sin haber llamado a escribir_fichero.
+        self.registro: list[tuple[str, dict, str]] = []
 
     @property
     def nombres(self) -> set[str]:
@@ -57,6 +67,7 @@ class Acciones:
         """Turno nuevo: lo del anterior ya no cuenta."""
         self.ultimo_fallo = None
         self.llamadas = 0
+        self.registro.clear()
 
     def __call__(self, nombre: str, args) -> str:  # noqa: ANN001
         # Se registra la llamada y su resultado: sin esto, cuando el asistente
@@ -64,8 +75,18 @@ class Acciones:
         # herramienta dijo que no o si se lo ha inventado.
         self.llamadas += 1
         resultado = self._ejecutar(nombre, args)
+        self.registro.append((nombre, args if isinstance(args, dict) else {}, resultado))
         self._avisar(nombre, args, resultado)
         return resultado
+
+    def herramientas_ok(self) -> set[str]:
+        """Las herramientas de este turno que NO han fallado.
+
+        Contar llamadas a secas no basta: el modelo mira el tiempo, no escribe
+        nada y remata con «te lo he guardado». Como sí llamó a *algo*, un contador
+        no lo pilla; lo que hay que saber es si llamó a **la que hacía falta**.
+        """
+        return {n for n, _, r in self.registro if not es_fallo(r)}
 
     def _ejecutar(self, nombre: str, args) -> str:  # noqa: ANN001
         """La llamada en sí: busca la herramienta, la corre y apunta el fallo."""
@@ -103,8 +124,12 @@ def resumen_del_fallo(resultado: str) -> str:
     Lo que devuelven las herramientas cuando algo falla lleva una coletilla para
     que el modelo reintente («Corrige el comando y vuelve a llamarla»). Eso no se
     dice en voz alta: aquí se queda solo el motivo.
+
+    Lo nuevo va detrás de `MARCA_MODELO` y se corta de un tajo. La lista de frases
+    sigue por los mensajes que aún no la llevan: es lo que había, y funciona
+    mientras nadie los reescriba.
     """
-    frase = " ".join(resultado.split())
+    frase = " ".join(resultado.split(MARCA_MODELO)[0].split())
     for corte in (". Corrige", ". Pregúntale", ". Díselo", ". Créala", ". Si de verdad"):
         frase = frase.split(corte)[0]
     frase = frase.split(". Ha dicho:")[0]
@@ -112,6 +137,29 @@ def resumen_del_fallo(resultado: str) -> str:
     frase = frase.removeprefix("NO he abierto nada: ").removeprefix("NO ha salido bien: ")
     frase = frase.rstrip(". ")
     return frase[:200]
+
+
+#: Las herramientas cuyo fichero se enseña en la ventana de chat. Las dos dicen
+#: la ruta igual, así que sale una sola función: escribir para verlo recién
+#: hecho, leer para «enséñame el resumen que me hiciste».
+_HERRAMIENTAS_CON_FICHERO = ("escribir_fichero", "leer_fichero")
+
+
+def fichero_de_la_llamada(nombre: str, args) -> Path | None:  # noqa: ANN001
+    """El fichero que toca esta llamada, o None si no toca ninguno que enseñar.
+
+    Solo `escribir_fichero` y `leer_fichero`: `ejecutar_comando` con un
+    `echo … > x` o un `cat x` también anda con ficheros, pero desde fuera no hay
+    forma de saber cuál sin ponerse a interpretar la shell, y equivocarse ahí es
+    enseñar un documento que no es.
+    """
+    if nombre not in _HERRAMIENTAS_CON_FICHERO or not isinstance(args, dict):
+        return None
+    ruta = (args.get("ruta") or args.get("fichero") or args.get("archivo") or "").strip()
+    if not ruta:
+        return None
+    carpeta = str(args.get("carpeta") or args.get("directorio") or "")
+    return resolver_ruta(ruta, carpeta)
 
 
 def resumen_de_la_llamada(nombre: str, args) -> str:  # noqa: ANN001

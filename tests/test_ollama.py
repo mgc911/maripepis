@@ -108,3 +108,126 @@ def test_error_de_ollama_se_cuenta(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="500"):
         OllamaProvider(model="x").run_tools_turn("s", [], [_Tool()], lambda n, a: "")
+
+
+def test_al_agotar_las_vueltas_pide_un_cierre_en_condiciones(monkeypatch):
+    # Con leer + consultar + escribir, un turno normal encadena varias llamadas.
+    # Si se acaban las vueltas a media faena, lo que queda en `texto` es medio
+    # turno («el contenido del fichero es el siguiente:»), no una respuesta.
+    llamada = {"function": {"name": "ejecutar_comando", "arguments": {}}}
+    a_medias = {"content": "El contenido del archivo es el siguiente:",
+                "tool_calls": [llamada]}
+    respuestas = Respuestas(*[a_medias] * 8, {"content": "Te lo he actualizado."})
+    provider = _provider(monkeypatch, respuestas)
+
+    reply = provider.run_tools_turn("sé breve", [], [_Tool()], lambda n, a: "Hecho.",
+                                    max_iters=8)
+
+    assert reply == "Te lo he actualizado."
+    # Y el cierre se pide SIN herramientas, para que no siga llamando.
+    assert "tools" not in respuestas.peticiones[-1]
+
+
+def test_si_el_modelo_remata_solo_no_se_pide_ningun_cierre(monkeypatch):
+    llamada = {"function": {"name": "ejecutar_comando", "arguments": {}}}
+    respuestas = Respuestas({"content": "", "tool_calls": [llamada]},
+                            {"content": "Ya está la carpeta."})
+    provider = _provider(monkeypatch, respuestas)
+
+    reply = provider.run_tools_turn("sé breve", [], [_Tool()], lambda n, a: "Hecho.")
+
+    assert reply == "Ya está la carpeta."
+    assert len(respuestas.peticiones) == 2      # ni una petición de más
+
+
+def test_insiste_una_vez_si_el_modelo_solo_anuncia_lo_que_hara(monkeypatch):
+    # Lo visto con qwen2.5:7b: «he leído el fichero; ahora voy a actualizarlo», y
+    # ahí se acababa el turno. El fichero se quedaba igual y sonaba a éxito.
+    llamada = {"function": {"name": "ejecutar_comando", "arguments": {}}}
+    respuestas = Respuestas(
+        {"content": "He leído el archivo. Ahora voy a actualizarlo."},
+        {"content": "", "tool_calls": [llamada]},
+        {"content": "Ya te lo he actualizado."},
+    )
+    provider = _provider(monkeypatch, respuestas)
+
+    reply = provider.run_tools_turn("sé breve", [], [_Tool()], lambda n, a: "Hecho.")
+
+    assert reply == "Ya te lo he actualizado."
+    assert len(respuestas.peticiones) == 3
+    # `messages` es la misma lista en todas las peticiones (se va ampliando), así
+    # que el empujón se busca en el conjunto, no en una posición.
+    enviados = [m.get("content", "") for m in respuestas.peticiones[-1]["messages"]]
+    assert any("hazlo ahora" in m.lower() for m in enviados)
+
+
+def test_no_insiste_mas_de_dos_veces(monkeypatch):
+    # Dos y no una: a la primera el modelo suele reaccionar pero llamando a la
+    # herramienta equivocada. A partir de la tercera es dar vueltas.
+    respuestas = Respuestas(*[{"content": "Ahora voy a hacerlo."}] * 6)
+    provider = _provider(monkeypatch, respuestas)
+
+    provider.run_tools_turn("sé breve", [], [_Tool()], lambda n, a: "Hecho.")
+
+    assert len(respuestas.peticiones) == 3      # el intento y dos empujones
+
+
+def test_una_respuesta_normal_no_se_confunde_con_un_anuncio(monkeypatch):
+    respuestas = Respuestas({"content": "Hoy en Alicante hace 24 grados y sol."})
+    provider = _provider(monkeypatch, respuestas)
+
+    reply = provider.run_tools_turn("sé breve", [], [_Tool()], lambda n, a: "Hecho.")
+
+    assert reply == "Hoy en Alicante hace 24 grados y sol."
+    assert len(respuestas.peticiones) == 1
+
+
+class ExecuteQueRecuerda:
+    """Como Acciones: sabe qué herramientas salieron bien en el turno."""
+
+    def __init__(self, ok=()):
+        self.ok = set(ok)
+        # Coherente con las de verdad: si algo salió bien, hubo llamada.
+        self.llamadas = len(self.ok)
+
+    def herramientas_ok(self):
+        return self.ok
+
+    def __call__(self, nombre, args):
+        self.llamadas += 1
+        self.ok.add(nombre)
+        return "Hecho."
+
+
+def test_insiste_si_dice_haber_guardado_sin_llamar_a_escribir(monkeypatch):
+    # Lo medido con qwen2.5:7b: consulta el tiempo, no escribe, y remata con
+    # «te lo he guardado». Desmentirlo después es el último recurso; lo que
+    # arregla el turno es insistirle aquí, que casi siempre lo hace a la segunda.
+    llamada = {"function": {"name": "escribir_fichero", "arguments": {}}}
+    respuestas = Respuestas(
+        {"content": "Te lo he guardado en documentos."},          # mentira
+        {"content": "", "tool_calls": [llamada]},                  # tras insistir
+        {"content": "Ya está guardado de verdad."},
+    )
+    provider = _provider(monkeypatch, respuestas)
+    execute = ExecuteQueRecuerda(ok={"consultar_tiempo"})
+
+    reply = provider.run_tools_turn("sé breve", [], [_Tool()], execute)
+
+    assert reply == "Ya está guardado de verdad."
+    assert "escribir_fichero" in execute.ok
+    # Y se le nombra la herramienta que falta, que si no vuelve a llamar a la
+    # que ya había llamado.
+    enviados = [m.get("content", "") for m in respuestas.peticiones[-1]["messages"]]
+    assert any("Llama AHORA a escribir_fichero" in m for m in enviados)
+
+
+def test_no_insiste_si_de_verdad_llamo_a_la_herramienta(monkeypatch):
+    respuestas = Respuestas({"content": "Te lo he guardado en documentos."})
+    provider = _provider(monkeypatch, respuestas)
+
+    reply = provider.run_tools_turn("sé breve", [], [_Tool()],
+                                    ExecuteQueRecuerda(ok={"escribir_fichero"}))
+
+    assert reply == "Te lo he guardado en documentos."
+    assert len(respuestas.peticiones) == 1

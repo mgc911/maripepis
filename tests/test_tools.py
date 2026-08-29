@@ -1,6 +1,6 @@
 import pytest
 
-from maripepis.tools.base import Tool
+from maripepis.tools.base import Tool, es_fallo
 from maripepis.tools.system import (
     abrir_aplicacion,
     buscar_en_internet,
@@ -13,7 +13,7 @@ def test_build_default_tools():
     nombres = {t.name for t in tools}
     assert nombres == {
         "abrir_navegador", "buscar_en_internet", "abrir_aplicacion",
-        "escribir_fichero", "ejecutar_comando",
+        "consultar_tiempo", "escribir_fichero", "leer_fichero", "ejecutar_comando",
     }
     for t in tools:
         assert isinstance(t, Tool)
@@ -23,7 +23,9 @@ def test_la_shell_se_puede_quitar():
     nombres = {t.name for t in build_default_tools({"shell": {"enabled": False}})}
     assert "ejecutar_comando" not in nombres
     assert "escribir_fichero" not in nombres   # también toca tus ficheros
+    assert "leer_fichero" not in nombres       # y leerlos también es tocarlos
     assert "abrir_aplicacion" in nombres
+    assert "consultar_tiempo" in nombres       # el tiempo no toca nada tuyo
 
 
 def test_conversion_a_formatos():
@@ -44,7 +46,15 @@ def test_handlers_piden_argumentos_si_faltan():
     assert "?" in abrir_aplicacion({})
 
 
-def test_buscar_sin_xdg_open(monkeypatch):
+@pytest.fixture
+def sin_resultados(monkeypatch):
+    """Una búsqueda que no encuentra nada: el caso en que se cae al navegador."""
+    import maripepis.tools.system as sys_tools
+
+    monkeypatch.setattr(sys_tools, "buscar_texto", lambda consulta: "")
+
+
+def test_buscar_sin_xdg_open(monkeypatch, sin_resultados):
     import maripepis.tools.system as sys_tools
 
     monkeypatch.setattr(sys_tools.shutil, "which", lambda _: None)
@@ -52,7 +62,35 @@ def test_buscar_sin_xdg_open(monkeypatch):
     assert "xdg-open" in msg
 
 
-def test_execute_via_tool_run(monkeypatch):
+def test_lo_que_encuentra_vuelve_como_texto(monkeypatch):
+    # Lo que arregla el bug: antes esto abría una pestaña y devolvía «he buscado
+    # X», sin un solo dato. El modelo no podía contestar, y se lo inventaba.
+    import maripepis.tools.system as sys_tools
+
+    lanzados = []
+    monkeypatch.setattr(sys_tools, "buscar_texto", lambda c: "El Teide mide 3715 m.")
+    monkeypatch.setattr(sys_tools, "_launch", lambda args: lanzados.append(args))
+
+    msg = buscar_en_internet({"consulta": "altura del Teide"})
+    assert "3715" in msg
+    assert not lanzados          # y sin abrir nada por el camino
+
+
+def test_si_no_encuentra_nada_lo_dice_y_abre_el_navegador(monkeypatch, sin_resultados):
+    import maripepis.tools.system as sys_tools
+
+    lanzados = []
+    monkeypatch.setattr(sys_tools.shutil, "which", lambda _: "/usr/bin/xdg-open")
+    monkeypatch.setattr(sys_tools, "_launch", lambda args: lanzados.append(args))
+
+    msg = buscar_en_internet({"consulta": "gatos"})
+    assert es_fallo(msg)         # para que el turno no lo dé por bueno
+    assert "gatos" in msg
+    assert lanzados and lanzados[0][0] == "xdg-open"
+    assert "duckduckgo" in lanzados[0][1]
+
+
+def test_execute_via_tool_run(monkeypatch, sin_resultados):
     import maripepis.tools.system as sys_tools
 
     lanzados = []
@@ -63,7 +101,6 @@ def test_execute_via_tool_run(monkeypatch):
     msg = tools["buscar_en_internet"].run({"consulta": "gatos"})
     assert "gatos" in msg
     assert lanzados and lanzados[0][0] == "xdg-open"
-    assert "duckduckgo" in lanzados[0][1]
 
 
 def test_no_dice_que_abre_lo_que_no_existe(monkeypatch):

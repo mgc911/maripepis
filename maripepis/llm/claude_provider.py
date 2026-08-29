@@ -23,6 +23,17 @@ class ClaudeProvider(LLMProvider):
 
         # Lee ANTHROPIC_API_KEY del entorno (o un perfil de `ant auth login`).
         self.client = anthropic.Anthropic()
+
+        # Sin clave, el SDK se construye tan feliz y no protesta hasta la primera
+        # petición. Eso aquí es un desastre: maripepis arrancaría bien, o el
+        # switch de la ventana se pondría en «Claude», y te enterarías al hablar
+        # —que es cuando no estás mirando la pantalla—. Mejor no llegar a existir.
+        if not (self.client.api_key or getattr(self.client, "auth_token", None)):
+            raise RuntimeError(
+                "El backend 'claude' necesita ANTHROPIC_API_KEY en el entorno. "
+                "Expórtala (fish: set -x ANTHROPIC_API_KEY sk-ant-...) o usa el "
+                "backend 'claude-code', que va con tu suscripción."
+            )
         self.model = model
         self.max_tokens = max_tokens
 

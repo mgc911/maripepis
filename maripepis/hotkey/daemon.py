@@ -22,17 +22,25 @@ import signal
 import socket
 import threading
 import time
+from pathlib import Path
 
-from ..tools import es_fallo, resumen_de_la_llamada
+from ..llm.factory import build_provider
+from ..tools import es_fallo, fichero_de_la_llamada, resumen_de_la_llamada
+from ..tools.ficheros import para_la_ventana
 from ..turn import reply_turn
 from . import clipboard, window
 from .notify import Notifier
-from .protocol import MODES, SUBSCRIBE, decode, encode, event, socket_path
+from .protocol import BACKENDS, MODES, SUBSCRIBE, decode, encode, event, socket_path
 
 LOADING = "loading"
 IDLE = "idle"
 RECORDING = "recording"
 PROCESSING = "processing"
+# Entre transcribir y hablar hay un hueco que antes no se contaba: el LLM
+# trabajando. Con Ollama eran décimas y daba igual decir ya «hablando»; con
+# Claude Code, que piensa y se va a internet antes de abrir la boca, son diez
+# segundos largos en los que la ventana juraba estar hablando y no se oía nada.
+THINKING = "thinking"
 SPEAKING = "speaking"
 
 _ASISTENTE, _DICTADO = MODES
@@ -70,6 +78,7 @@ class HotkeyDaemon:
         # escucha la respuesta no tiene por qué creerse el «ya está hecho».
         if execute is not None and hasattr(execute, "on_call"):
             execute.on_call = self._al_ejecutar
+        self._engancharse_al_proveedor(provider)
 
         hk = cfg.get("hotkey", {})
         self.socket_path = socket_path(hk.get("socket") or None)
@@ -94,6 +103,9 @@ class HotkeyDaemon:
         self._running = False
         self._subscribers: list[socket.socket] = []   # ventanas de chat mirando
         self._window_launch = 0.0
+        #: Motor en uso. Se puede cambiar en caliente (orden `backend`, switch de
+        #: la ventana); de ahí que se guarde aparte y no se lea de `cfg` cada vez.
+        self._backend = str(cfg.get("llm", {}).get("backend", "ollama"))
 
     # ── estado ───────────────────────────────────────────────────────────
 
@@ -101,6 +113,18 @@ class HotkeyDaemon:
     def state(self) -> str:
         with self._lock:
             return self._state
+
+    def _marcar_hablando(self, turno: int) -> None:
+        """Pasa a SPEAKING la primera vez que hay algo que decir; luego, no hace nada.
+
+        Lo llama el hilo del turno en cada token, así que tiene que ser barato e
+        idempotente: en cuanto ya está en SPEAKING se sale sin tocar el socket.
+        """
+        with self._lock:
+            if turno != self._turn or self._state == SPEAKING:
+                return
+            self._state = SPEAKING
+        self.broadcast("state", state=SPEAKING)  # fuera del lock: escribe en sockets
 
     def _finish(self, turn: int) -> None:
         """Vuelve a reposo, salvo que otra pulsación ya haya tomado el relevo."""
@@ -124,9 +148,47 @@ class HotkeyDaemon:
 
     def _al_ejecutar(self, nombre: str, args: dict, resultado: str) -> None:
         """Una herramienta acaba de correr: que se vea en la ventana de chat."""
+        salio = not es_fallo(resultado)
         self.broadcast("tool", name=nombre,
                        text=resumen_de_la_llamada(nombre, args),
-                       ok=not es_fallo(resultado))
+                       ok=salio)
+        if salio and (destino := fichero_de_la_llamada(nombre, args)):
+            self._mostrar_documento(str(destino))
+
+    def _mostrar_documento(self, ruta: str) -> None:
+        """Manda a la ventana el fichero que se acaba de escribir, para verlo.
+
+        Que te diga «ya lo tienes en Documentos» y tengas que ir a abrirlo para
+        saber qué ha puesto es media respuesta. El texto **no** vuelve al modelo
+        (para eso está `leer_fichero`): solo viaja por el socket y se pinta.
+        """
+        documento = para_la_ventana(Path(ruta))
+        if documento is None:
+            return
+        destino, contenido = documento
+        self.broadcast("document", path=destino, text=contenido)
+
+    def _engancharse_al_proveedor(self, provider) -> None:  # noqa: ANN001
+        """Pide al proveedor que avise de SUS herramientas, si sabe hacerlo.
+
+        Claude Code trae las suyas y no pasan por `Acciones`: sin esto, el turno
+        se va diez segundos a buscar en internet y en la ventana no aparece nada
+        —ni el comando, ni un aviso—, que es exactamente lo que se ve cuando algo
+        se ha colgado. Se vuelve a llamar al cambiar de motor en caliente.
+        """
+        if hasattr(provider, "on_tool"):
+            provider.on_tool = self._al_ejecutar_el_proveedor
+        if hasattr(provider, "on_file"):
+            provider.on_file = self._mostrar_documento
+
+    def _al_ejecutar_el_proveedor(self, nombre: str, resumen: str, ok: bool) -> None:
+        """Una herramienta del proveedor (no nuestra): misma línea en la ventana.
+
+        El resumen lo trae hecho quien la lanzó: `resumen_de_la_llamada` sabe de
+        las herramientas de maripepis, no de las de Claude Code. El fichero que
+        deje, si deja alguno, llega aparte y más tarde por `on_file`.
+        """
+        self.broadcast("tool", name=nombre, text=resumen, ok=ok)
 
     def broadcast(self, kind: str, **fields) -> None:
         """Empuja un evento a las ventanas de chat conectadas.
@@ -150,7 +212,8 @@ class HotkeyDaemon:
     def _hello(self) -> dict:
         """La bienvenida: estado y conversación en curso, para no abrir en blanco."""
         return event("hello", state=self.state,
-                     history=list(self.conversation.messages))
+                     history=list(self.conversation.messages),
+                     backend=self._backend, backend_label=self.provider.label)
 
     def _add_subscriber(self, conn: socket.socket) -> bool:
         """Apunta un visor nuevo. Devuelve False si se fue antes de la bienvenida."""
@@ -228,9 +291,64 @@ class HotkeyDaemon:
             return self._stop()
         if cmd == "cancel":
             return self._cancel()
+        if cmd == "backend":
+            return self._cambiar_backend(str(req.get("value", "")))
         if cmd in ("status", "ping"):
-            return {"ok": True, "state": self.state}
+            return {"ok": True, "state": self.state, "backend": self._backend}
         return {"ok": False, "error": "orden desconocida", "state": self.state}
+
+    def _cambiar_backend(self, valor: str) -> dict:
+        """Cambia de motor en caliente, sin reiniciar ni perder la conversación.
+
+        Tres cosas de las que hay que acordarse aquí:
+
+        * **A mitad de turno no.** Si está grabando o pensando, el proveedor lo
+          está usando otro hilo; se dice que no y se queda como estaba.
+        * **Si no se puede construir, no se cambia.** El backend `claude` quiere
+          `ANTHROPIC_API_KEY`, y sin ella revienta al instanciarse. Antes de tocar
+          nada se monta el proveedor nuevo: si falla, el viejo sigue en su sitio y
+          el fallo se cuenta. Cambiar y descubrirlo en el turno siguiente sería
+          dejar a maripepis muda a mitad de conversación.
+        * **El historial se queda.** Es neutro (`Conversation`), así que la
+          conversación continúa con el motor nuevo desde donde iba.
+
+        Las herramientas no hace falta apagarlas a mano: `reply_turn` mira
+        `provider.accepts_tools`, y con `claude-code` (que trae las suyas) se va
+        por la vía sin herramientas él solo.
+        """
+        if valor not in BACKENDS:
+            return {"ok": False, "error": f"motor desconocido: {valor}",
+                    "state": self.state, "backend": self._backend}
+
+        with self._lock:
+            if self._state not in (IDLE, LOADING):
+                return {"ok": False, "error": "ocupado", "state": self._state,
+                        "backend": self._backend}
+            if valor == self._backend:
+                return {"ok": True, "state": self._state, "backend": self._backend}
+
+        cfg = dict(self.cfg)
+        cfg["llm"] = {**self.cfg.get("llm", {}), "backend": valor}
+        try:
+            provider = build_provider(cfg)
+        except Exception as e:  # noqa: BLE001 - falta la clave, el CLI, lo que sea
+            self.logger.warning("No pude cambiar a %s: %s", valor, e)
+            motivo = f"No he podido cambiar a {valor}: {e}"
+            self.broadcast("backend", backend=self._backend,
+                           backend_label=self.provider.label, ok=False, text=motivo)
+            self._fallo(motivo)
+            return {"ok": False, "error": str(e), "state": self.state,
+                    "backend": self._backend}
+
+        with self._lock:
+            self.provider = provider
+            self._backend = valor
+        self._engancharse_al_proveedor(provider)
+
+        self.logger.info("Motor cambiado a %s (%s).", valor, provider.label)
+        self.broadcast("backend", backend=valor, backend_label=provider.label, ok=True,
+                       text=f"Ahora hablas con {provider.label}.")
+        return {"ok": True, "state": self.state, "backend": valor}
 
     def _start(self, mode: str) -> dict:
         if mode not in MODES:
@@ -248,8 +366,11 @@ class HotkeyDaemon:
                     self.notifier.show("🧠 Estoy pensando…", timeout_ms=2000)
                 return {"ok": False, "error": "ocupado", "state": self._state}
 
-            if self._state == SPEAKING and self.speech:
-                self.speech.stop()  # barge-in: te callo y te escucho
+            if self._state in (THINKING, SPEAKING) and self.speech:
+                # Barge-in: te callo y te escucho. También mientras piensa, que
+                # con Claude Code buscando en internet es medio minuto en el que
+                # antes se podía interrumpir y ahora también.
+                self.speech.stop()
 
             self._turn += 1
             turno = self._turn
@@ -291,7 +412,7 @@ class HotkeyDaemon:
             estado, self._state = self._state, IDLE
         if estado == RECORDING:
             self.recorder.cancel()
-        elif estado == SPEAKING and self.speech:
+        elif estado in (THINKING, SPEAKING) and self.speech:
             self.speech.stop()
         self.broadcast("state", state=IDLE)
         return {"ok": True, "state": IDLE}
@@ -381,19 +502,30 @@ class HotkeyDaemon:
         with self._lock:
             if turno != self._turn:
                 return
-            self._state = SPEAKING
-        self.broadcast("state", state=SPEAKING)
+            self._state = THINKING
+        self.broadcast("state", state=THINKING)
+
+        def al_token(tok: str) -> None:
+            # El primer trozo es la frontera: hasta aquí pensaba, de aquí en
+            # adelante habla (Piper empieza con la primera frase completa).
+            self._marcar_hablando(turno)
+            # La ventana escribe a la vez que Piper habla; sin esto la respuesta
+            # aparecería de golpe cuando ya se ha terminado de oír.
+            self.broadcast("delta", text=tok)
 
         reply = reply_turn(
             self.provider, self.conversation, text, self.logger,
             speech=self.speech, tools=self.tools, execute=self.execute,
-            # La ventana escribe a la vez que Piper habla; sin esto la respuesta
-            # aparecería de golpe cuando ya se ha terminado de oír.
-            on_token=lambda tok: self.broadcast("delta", text=tok),
+            on_token=al_token,
         )
         if reply is None:
             self._fallo("El motor LLM no responde")
             return
+
+        # La vía de herramientas (`run_tools_turn`, Ollama) no da tokens: no ha
+        # pasado por `al_token` y el estado seguiría en «pensando» mientras Piper
+        # lee la respuesta entera.
+        self._marcar_hablando(turno)
 
         self.logger.info("Maripepis: %s", reply)
         self.notifier.show("🐙 Maripepis", reply, urgency="normal", timeout_ms=8000)

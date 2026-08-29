@@ -10,7 +10,10 @@ Dos cosas que el CLI impone y explican el diseño de este fichero:
   - No acepta un historial estructurado: la conversación viaja aplanada dentro
     del prompt (ver :meth:`ClaudeCodeProvider.build_prompt`).
   - No admite herramientas nuestras. Las que use son las suyas (`tools` en
-    `config.toml`); por eso `accepts_tools = False`.
+    `config.toml`); por eso `accepts_tools = False`. Como no pasan por el
+    `Acciones` de maripepis, nadie se enteraría de que corren: lo que las saca a
+    la luz es el aviso `on_tool` (ver abajo), que el demonio engancha para
+    pintarlas en la ventana de chat.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from .base import LLMProvider
 
@@ -31,6 +34,60 @@ NOTA_HISTORIAL = (
     "El bloque «Conversación previa» es solo contexto. Responde únicamente al "
     "último mensaje del usuario, sin prefijos ni etiquetas."
 )
+
+# Sin esta nota, «hazme un markdown con la lista de la compra» se resuelve con un
+# `cat > fichero << EOF` por Bash —medido: 1 de 1 la primera vez que se probó—, y
+# entonces la ventana de chat no puede enseñar el documento: de un comando de
+# shell no hay forma de saber qué fichero ha escrito sin ponerse a interpretar
+# redirecciones, y equivocarse ahí es enseñar un documento que no es.
+NOTA_FICHEROS = (
+    "Para crear o cambiar un fichero usa SIEMPRE la herramienta Write (o Edit), y "
+    "para leerlo la herramienta Read; nunca un `cat`, un `echo >` ni un `tee` por "
+    "Bash."
+)
+
+
+# El argumento que se enseña de cada herramienta de Claude Code: el JSON entero
+# no dice nada y `description` es prosa que ya cuenta la respuesta. Lo que hace
+# falta ver es QUÉ ha ejecutado (el comando, la búsqueda, el fichero).
+_ARGUMENTO_PRINCIPAL = {
+    "Bash": "command",
+    "WebSearch": "query",
+    "WebFetch": "url",
+    "Read": "file_path",
+    "Write": "file_path",
+    "Edit": "file_path",
+    "Glob": "pattern",
+    "Grep": "pattern",
+    "Task": "description",
+}
+_MAX_RESUMEN = 120
+# Las suyas que andan con un fichero concreto, y de qué argumento sale la ruta.
+# Con esas, la ventana enseña el documento entero además de la línea de ⚙️: las
+# de escribir para verlo recién hecho, `Read` para «enséñame el resumen».
+_TOCAN_FICHERO = {
+    "Write": "file_path",
+    "Edit": "file_path",
+    "NotebookEdit": "notebook_path",
+    "Read": "file_path",
+}
+
+
+def resumen_de_la_herramienta(nombre: str, args: dict) -> str:
+    """Una línea legible de la llamada, con la misma pinta que las de maripepis.
+
+    ``("Bash", {"command": "free -h"})`` → ``Bash · free -h``
+    """
+    if not isinstance(args, dict):
+        args = {}
+    clave = _ARGUMENTO_PRINCIPAL.get(nombre)
+    valor = str(args.get(clave) or "") if clave else ""
+    if not valor.strip():
+        valor = ", ".join(f"{k}={v}" for k, v in args.items() if str(v).strip())
+    valor = " ".join(valor.split())
+    if len(valor) > _MAX_RESUMEN:
+        valor = valor[: _MAX_RESUMEN - 1].rstrip() + "…"
+    return f"{nombre} · {valor}" if valor else nombre
 
 
 class ClaudeCodeProvider(LLMProvider):
@@ -62,6 +119,20 @@ class ClaudeCodeProvider(LLMProvider):
         self.safe_mode = safe_mode
         self.timeout_s = float(timeout_s)
         self.cwd = cwd
+        #: Aviso de que una herramienta suya se ha puesto en marcha:
+        #: ``on_tool(nombre, resumen, salio_bien)``. Lo engancha el demonio para
+        #: pintarla en la ventana de chat, igual que hace con las de maripepis
+        #: por `Acciones.on_call`. Sin esto, un turno que se pasa diez segundos
+        #: buscando en internet no enseña absolutamente nada por el camino.
+        #: Aviso de que una herramienta suya se ha puesto en marcha:
+        #: ``on_tool(nombre, resumen, salio_bien)``.
+        self.on_tool: Callable[[str, str, bool], None] | None = None
+        #: Aviso de que ha dejado un fichero escrito: ``on_file(ruta)``. Va
+        #: aparte de `on_tool` y llega **más tarde** a propósito: la llamada se
+        #: canta al lanzarla (que es lo que tapa la espera) y entonces el fichero
+        #: todavía no existe. Este salta con el resultado, con el fichero ya en
+        #: el disco y sabiendo que no ha fallado.
+        self.on_file: Callable[[str], None] | None = None
 
     @property
     def label(self) -> str:
@@ -119,8 +190,18 @@ class ClaudeCodeProvider(LLMProvider):
             args += ["--model", self.model]
         if self.permission_mode:
             args += ["--permission-mode", self.permission_mode]
+        # Las dos notas van juntas en un solo `--append-system-prompt`: repetir la
+        # opción no está dicho en ninguna parte que sume, y no se va a averiguar
+        # a base de que un turno salga raro.
+        notas = []
         if con_historial:
-            args += ["--append-system-prompt", NOTA_HISTORIAL]
+            notas.append(NOTA_HISTORIAL)
+        if self.tools == "default" or any(
+            h in self.tools for h in ("Write", "Edit", "Read")
+        ):
+            notas.append(NOTA_FICHEROS)
+        if notas:
+            args += ["--append-system-prompt", " ".join(notas)]
         return args
 
     def _env(self) -> dict:
@@ -131,6 +212,20 @@ class ClaudeCodeProvider(LLMProvider):
         env.pop("ANTHROPIC_API_KEY", None)
         env.pop("ANTHROPIC_AUTH_TOKEN", None)
         return env
+
+    def _avisar(self, aviso, *datos) -> None:  # noqa: ANN001
+        """Llama a un aviso sin dejar que se lleve el turno por delante.
+
+        Es código de fuera (el demonio, un test) metido en mitad del bucle que va
+        leyendo al CLI: si revienta, lo que se pierde es una línea en la ventana,
+        no la respuesta que el usuario está esperando.
+        """
+        if aviso is None:
+            return
+        try:
+            aviso(*datos)
+        except Exception:  # noqa: BLE001, S110 - un visor no puede cortar el turno
+            pass
 
     # --------------------------------------------------------------- streaming
 
@@ -159,6 +254,10 @@ class ClaudeCodeProvider(LLMProvider):
 
         limite = time.monotonic() + self.timeout_s
         algo_dicho = False
+        # id → (nombre, fichero que deja): el `tool_result`, que es el que dice si
+        # salió bien y el momento en que el fichero ya existe, llega después y
+        # solo trae el id.
+        en_marcha: dict[str, tuple[str, str]] = {}
         try:
             try:
                 proc.stdin.write(prompt)
@@ -181,6 +280,28 @@ class ClaudeCodeProvider(LLMProvider):
                     if trozo:
                         algo_dicho = True
                         yield trozo
+                elif tipo == "assistant":
+                    # El mensaje entero ya trae la llamada con sus argumentos
+                    # completos; los `input_json_delta` del streaming llegan a
+                    # cachos y habría que recomponerlos a mano.
+                    for nombre, id_, args in _llamadas(evento):
+                        clave = _TOCAN_FICHERO.get(nombre)
+                        en_marcha[id_] = (nombre,
+                                          str(args.get(clave) or "") if clave else "")
+                        self._avisar(self.on_tool, nombre,
+                                     resumen_de_la_herramienta(nombre, args), True)
+                elif tipo == "user":
+                    # La vuelta de la herramienta. La llamada NO se vuelve a
+                    # cantar (ya se anunció al lanzarla); aquí solo se cuenta lo
+                    # que falló, y se enseña el fichero de la que salió bien, que
+                    # es el primer momento en que existe en el disco.
+                    for id_, mal, motivo in _resultados(evento):
+                        nombre, fichero = en_marcha.pop(id_, ("herramienta", ""))
+                        if mal:
+                            self._avisar(self.on_tool, nombre,
+                                         f"{nombre} · {motivo}", False)
+                        elif fichero:
+                            self._avisar(self.on_file, fichero)
                 elif tipo == "result":
                     if evento.get("is_error") or evento.get("subtype") != "success":
                         raise RuntimeError(_motivo_del_fallo(evento))
@@ -232,6 +353,31 @@ def _delta_de_texto(event: dict) -> str:
     if delta.get("type") != "text_delta":
         return ""
     return delta.get("text") or ""
+
+
+def _bloques(evento: dict) -> list:
+    """Los bloques de contenido de un evento `assistant`/`user`, o lista vacía."""
+    contenido = (evento.get("message") or {}).get("content")
+    return contenido if isinstance(contenido, list) else []
+
+
+def _llamadas(evento: dict):
+    """``(nombre, id, argumentos)`` de cada herramienta que arranca en el evento."""
+    for b in _bloques(evento):
+        if isinstance(b, dict) and b.get("type") == "tool_use":
+            yield (str(b.get("name") or "herramienta"),
+                   str(b.get("id") or ""),
+                   b.get("input") if isinstance(b.get("input"), dict) else {})
+
+
+def _resultados(evento: dict, maximo: int = 120):
+    """``(id, ha_fallado, motivo)`` de cada herramienta que vuelve en el evento."""
+    for b in _bloques(evento):
+        if isinstance(b, dict) and b.get("type") == "tool_result":
+            motivo = " ".join(str(b.get("content") or "ha fallado").split())
+            if len(motivo) > maximo:
+                motivo = motivo[: maximo - 1].rstrip() + "…"
+            yield str(b.get("tool_use_id") or ""), bool(b.get("is_error")), motivo
 
 
 def _motivo_del_fallo(evento: dict) -> str:

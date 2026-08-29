@@ -6,8 +6,14 @@ Se puede depurar a mano:
     {"cmd": "status"}
 
 Órdenes: ``start`` (con ``mode``: "assistant" | "dictation"), ``stop``,
-``cancel``, ``status`` y ``ping``. **``stop`` no lleva modo**: el demonio
-recuerda el del ``start``, así soltar ALT+SHIFT+Z en dos tiempos no lía nada.
+``cancel``, ``status``, ``ping`` y ``backend`` (con ``value``: "ollama" |
+"claude" | "claude-code"). **``stop`` no lleva modo**: el demonio recuerda el
+del ``start``, así soltar ALT+SHIFT+Z en dos tiempos no lía nada.
+
+La ventana de chat manda ``backend`` por una conexión **aparte**, corta, como
+haría el cliente de la tecla. No por la de ``subscribe``: esa se queda muda a
+propósito (ver abajo), y leer de ella rompería el modo en que se detecta que una
+ventana se ha cerrado.
 
 Hay una orden más, ``subscribe``, que no usa la tecla sino la ventana de chat:
 en vez de contestar y cerrar, el demonio se queda con la conexión y le va
@@ -28,8 +34,11 @@ import os
 SOCKET_ENV = "MARIPEPIS_SOCKET"
 SOCKET_NAME = "maripepis.sock"
 
-COMMANDS = ("start", "stop", "cancel", "status", "ping")
+COMMANDS = ("start", "stop", "cancel", "status", "ping", "backend")
 MODES = ("assistant", "dictation")
+#: Los motores entre los que se puede cambiar en caliente. El orden manda: es el
+#: que usa el switch de la ventana para saber cuál es «el otro».
+BACKENDS = ("ollama", "claude", "claude-code")
 
 # La orden de la ventana de chat. Fuera de COMMANDS a propósito: `parse_argv` es
 # lo que acepta el cliente de la tecla, y suscribirse desde ahí no tiene sentido
@@ -38,16 +47,21 @@ SUBSCRIBE = "subscribe"
 
 # Eventos que el demonio empuja a los suscriptores:
 #   hello  estado y conversación en curso, nada más conectar (para no abrir en blanco)
-#   state  cambio de estado (idle | recording | processing | speaking), con `mode`
+#   state  cambio de estado, con `mode`:
+#            idle | recording | processing (transcribiendo) |
+#            thinking (el LLM trabajando, herramientas incluidas) | speaking
 #   reset  se ha empezado conversación nueva (caducó el contexto)
 #   user   lo que ha entendido Whisper
 #   tool   una herramienta en marcha: la orden que se ha ejecutado y si salió
+#   document un fichero recién escrito (`path` + `text`), para verlo en el chat
+#            plegable y con el Markdown pintado. No vuelve al modelo.
 #   delta  un trozo de la respuesta, según se genera
 #   reply  la respuesta entera y cerrada
 #   notice aviso sin importancia (no te he oído, copiado al portapapeles…)
+#   backend se ha cambiado de motor (o se ha intentado y no ha podido)
 #   error  algo ha fallado
-EVENTS = ("hello", "state", "reset", "user", "tool", "delta", "reply", "notice",
-          "error")
+EVENTS = ("hello", "state", "reset", "user", "tool", "document", "delta",
+          "reply", "notice", "backend", "error")
 
 
 def event(kind: str, **fields) -> dict:
@@ -93,6 +107,13 @@ def parse_argv(argv: list[str]) -> dict:
     cmd = argv[0].lower()
     if cmd not in COMMANDS:
         return {"cmd": "?"}
+
+    if cmd == "backend":
+        valor = argv[1].lower() if len(argv) > 1 else ""
+        if valor not in BACKENDS:
+            return {"cmd": "?"}
+        return {"cmd": "backend", "value": valor}
+
     if cmd != "start":
         return {"cmd": cmd}
 
@@ -104,5 +125,6 @@ def parse_argv(argv: list[str]) -> dict:
 
 def usage() -> str:
     return (
-        "uso: maripepis-hotkey start [assistant|dictation] | stop | cancel | status | ping"
+        "uso: maripepis-hotkey start [assistant|dictation] | stop | cancel | "
+        "status | ping | backend [ollama|claude|claude-code]"
     )

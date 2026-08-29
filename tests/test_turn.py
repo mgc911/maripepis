@@ -119,10 +119,16 @@ def test_stream_reply_text_sin_voz_ni_callback():
 
 
 class AccionesFalsas:
-    """Como las de verdad: se acuerdan de si lo último salió bien o no."""
+    """Como las de verdad: se acuerdan de si lo último salió bien o no.
 
-    def __init__(self, ultimo_fallo=None):
+    `llamadas` arranca en 1 porque estas son las de un turno en el que el modelo
+    SÍ usó una herramienta. El turno en el que no llamó a nada es otro caso, y
+    tiene sus propios tests: `llamadas=0`.
+    """
+
+    def __init__(self, ultimo_fallo=None, llamadas=1):
         self.ultimo_fallo = ultimo_fallo
+        self.llamadas = llamadas
         self.reseteada = False
 
     def reset(self):
@@ -166,3 +172,137 @@ def test_cada_turno_empieza_sin_los_fallos_del_anterior():
     reply_turn(FakeProvider(tools_reply="Hecho."), _conv(), "haz algo", LOG,
                tools=[object()], execute=acciones)
     assert acciones.reseteada
+
+
+# --- El turno en el que no se llamó a nada --------------------------------
+# El fallo que se vio en el journal: al pedirle actualizar un fichero ya creado,
+# el modelo contestaba «he actualizado el archivo» en 0,4 s, sin pasar por
+# ninguna herramienta. El fichero se quedaba igual y no había ni un fallo que
+# enseñar, porque no se llegó a intentar nada.
+
+def test_desmiente_al_modelo_si_no_llamo_a_ninguna_herramienta():
+    provider = FakeProvider(tools_reply="He actualizado el archivo resumen_tiempo.txt.")
+    speech = FakeSpeech()
+
+    reply = reply_turn(provider, _conv(), "actualiza el archivo", LOG,
+                       speech=speech, tools=[object()], execute=AccionesFalsas(llamadas=0))
+
+    assert "no he hecho nada" in reply.lower()
+    assert any("no he hecho nada" in d.lower() for d in speech.dichas)  # y lo dice en voz
+
+
+def test_no_desmiente_una_respuesta_que_no_presume_de_nada():
+    # Sin herramientas y sin cantar victoria: charla normal, no se toca.
+    provider = FakeProvider(tools_reply="Mañana en Alicante suele hacer calor.")
+    reply = reply_turn(provider, _conv(), "qué tal el tiempo", LOG,
+                       tools=[object()], execute=AccionesFalsas(llamadas=0))
+    assert reply == "Mañana en Alicante suele hacer calor."
+
+
+def test_no_desmiente_si_el_modelo_ya_reconoce_que_no_puede():
+    provider = FakeProvider(tools_reply="No he podido mirar el fichero.")
+    reply = reply_turn(provider, _conv(), "revísalo", LOG,
+                       tools=[object()], execute=AccionesFalsas(llamadas=0))
+    assert reply == "No he podido mirar el fichero."
+
+
+def test_sobre_un_execute_que_no_cuenta_llamadas_no_se_afirma_nada():
+    # Un invocable pelado no lleva la cuenta: no se le puede desmentir.
+    provider = FakeProvider(tools_reply="He creado la carpeta fotos.")
+    reply = reply_turn(provider, _conv(), "crea una carpeta", LOG,
+                       tools=[object()], execute=lambda n, a: "")
+    assert reply == "He creado la carpeta fotos."
+
+
+# --- El historial guarda la respuesta y nada más ---------------------------
+
+def test_en_el_historial_solo_va_la_respuesta():
+    # Hubo una versión que añadía una nota con lo que habían hecho las
+    # herramientas. Medido: con ella, el turno siguiente no llamaba a ninguna
+    # (0 de 6) porque leía que ya estaba hecho. Para eso está leer_fichero.
+    conv = _conv()
+    reply_turn(FakeProvider(tools_reply="Te lo he dejado en Documentos."), conv,
+               "hazme un resumen", LOG, tools=[object()],
+               execute=AccionesQueRecuerdan(ok={"escribir_fichero"}, llamadas=1))
+
+    assert conv.messages[-1] == {"role": "assistant",
+                                 "content": "Te lo he dejado en Documentos."}
+
+
+def test_el_turno_se_resetea_aunque_no_haya_herramientas():
+    # El reseteo vive fuera de la rama de herramientas: lo que se apunta se
+    # consulta pase lo que pase, también si se cae al streaming.
+    acciones = AccionesFalsas()
+    reply_turn(FakeProvider("respuesta normal"), _conv(), "hola", LOG, execute=acciones)
+    assert acciones.reseteada
+
+
+# --- Presumir de una herramienta que no se llamó ---------------------------
+# Contar llamadas no basta: el modelo consulta el tiempo, no escribe nada, y
+# remata con «te lo he guardado en documentos». Llamó a *algo*, así que el
+# contador se queda tan ancho.
+
+class AccionesQueRecuerdan(AccionesFalsas):
+    """Como las de verdad: sabe QUÉ herramientas salieron bien en el turno."""
+
+    def __init__(self, ok=(), **kw):
+        super().__init__(**kw)
+        self.ok = set(ok)
+
+    def herramientas_ok(self):
+        return self.ok
+
+
+def test_desmiente_al_que_dice_haber_guardado_sin_escribir_nada():
+    provider = FakeProvider(tools_reply="Te lo he guardado en documentos.")
+    acciones = AccionesQueRecuerdan(ok={"consultar_tiempo"}, llamadas=1)
+
+    reply = reply_turn(provider, _conv(), "guárdame el tiempo", LOG,
+                       tools=[object()], execute=acciones)
+
+    assert "no he llegado a escribir el fichero" in reply
+
+
+def test_no_desmiente_si_la_herramienta_que_hacia_falta_si_se_llamo():
+    provider = FakeProvider(tools_reply="Te lo he guardado en documentos.")
+    acciones = AccionesQueRecuerdan(ok={"consultar_tiempo", "escribir_fichero"},
+                                    llamadas=2)
+
+    reply = reply_turn(provider, _conv(), "guárdame el tiempo", LOG,
+                       tools=[object()], execute=acciones)
+
+    assert reply == "Te lo he guardado en documentos."
+
+
+def test_desmiente_al_que_dice_haber_abierto_algo_sin_abrirlo():
+    provider = FakeProvider(tools_reply="Ya te he abierto Firefox.")
+    acciones = AccionesQueRecuerdan(ok={"ejecutar_comando"}, llamadas=1)
+
+    reply = reply_turn(provider, _conv(), "abre firefox", LOG,
+                       tools=[object()], execute=acciones)
+
+    assert "no he abierto nada" in reply
+
+
+def test_desmiente_al_que_dice_haber_llamado_a_una_herramienta_que_no_llamo():
+    # Esta se pilla sola: la respuesta dice el nombre de la herramienta.
+    provider = FakeProvider(tools_reply=(
+        "He llamado a `escribir_fichero` para crear el archivo tiempo.txt."))
+    acciones = AccionesQueRecuerdan(ok={"consultar_tiempo"}, llamadas=1)
+
+    reply = reply_turn(provider, _conv(), "guárdalo", LOG,
+                       tools=[object()], execute=acciones)
+
+    assert "no he llamado a escribir_fichero" in reply
+
+
+def test_desmiente_tambien_la_mentira_en_pasiva():
+    # llama3.1:8b no dice «he guardado», dice «el archivo se ha modificado».
+    # Toda la detección estaba montada sobre la primera persona y se le escapaba.
+    provider = FakeProvider(tools_reply="El archivo tiempo.txt se ha modificado.")
+    acciones = AccionesQueRecuerdan(ok={"consultar_tiempo"}, llamadas=1)
+
+    reply = reply_turn(provider, _conv(), "modifícalo", LOG,
+                       tools=[object()], execute=acciones)
+
+    assert "no he llegado a escribir el fichero" in reply

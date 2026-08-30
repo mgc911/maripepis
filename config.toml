@@ -92,7 +92,6 @@ cwd = ""                       # directorio de trabajo del CLI ("" = desde donde
 enabled = false                # true, o usa --speak, para responder por voz
 engine = "piper"
 voice = "models/piper/es_ES-sharvard-medium.onnx"
-speed = 1.15
 
 [tools]
 enabled = true                 # el asistente puede abrir apps, buscar en internet,

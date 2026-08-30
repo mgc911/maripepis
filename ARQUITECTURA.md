@@ -601,7 +601,7 @@ max_tokens = 1024            # las respuestas de voz son breves
 [tts]
 engine = "piper"
 voice = "models/piper/es_ES-sharvard-medium.onnx"
-speed = 1.0
+# speed: opcional. Sin esta clave manda DEFAULT_SPEED (tts/piper_engine.py)
 
 [memory]                     # datos fijos del usuario/equipo (ver memory.py)
 enabled = true

@@ -11,9 +11,14 @@ from pathlib import Path
 
 from .base import TTSEngine
 
+#: Velocidad de la voz: única fuente de verdad para el valor por defecto.
+#: Es un multiplicador sobre el ritmo natural del modelo (1.0 = normal,
+#: 2.0 = el doble de rápido). Se ajusta desde `config.toml`, en [tts].speed.
+DEFAULT_SPEED = 2.1
+
 
 class PiperEngine(TTSEngine):
-    def __init__(self, model_path: str | None, speed: float = 1.0) -> None:
+    def __init__(self, model_path: str | None, speed: float = DEFAULT_SPEED) -> None:
         self.model_path = Path(model_path) if model_path else None
         self.speed = speed
 
@@ -21,6 +26,11 @@ class PiperEngine(TTSEngine):
     def label(self) -> str:
         name = self.model_path.name if self.model_path else "sin modelo"
         return f"Piper · {name}"
+
+    @property
+    def length_scale(self) -> float:
+        """Piper razona en «longitud»: cuanto menor, más rápido (inverso de speed)."""
+        return 1.0 / self.speed if self.speed > 0 else 1.0
 
     def _piper_bin(self) -> str | None:
         """Ruta al binario `piper`, buscando también junto al intérprete.
@@ -46,6 +56,16 @@ class PiperEngine(TTSEngine):
                 "Descárgalo con  scripts/download_models.sh"
             )
 
+    def _build_command(self, piper: str, out_path: str, sep: str = "_") -> list[str]:
+        """Comando de Piper. `sep` es el separador de los flags largos, que
+        cambia según la versión (guion bajo vs. guion)."""
+        return [
+            piper,
+            "--model", str(self.model_path),
+            f"--length{sep}scale", f"{self.length_scale:.4f}",
+            f"--output{sep}file", out_path,
+        ]
+
     def synthesize(self, text: str) -> bytes:
         self.check()
 
@@ -56,9 +76,9 @@ class PiperEngine(TTSEngine):
             piper = self._piper_bin()
             data_in = text.encode("utf-8")
             proc = None
-            # El flag de salida cambia según la versión de Piper (guion vs. guion bajo).
-            for out_flag in ("--output_file", "--output-file"):
-                cmd = [piper, "--model", str(self.model_path), out_flag, out_path]
+            # Los flags cambian según la versión de Piper (guion vs. guion bajo).
+            for sep in ("_", "-"):
+                cmd = self._build_command(piper, out_path, sep)
                 proc = subprocess.run(cmd, input=data_in, capture_output=True)
                 if proc.returncode == 0:
                     break

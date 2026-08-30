@@ -2,29 +2,27 @@ import pytest
 
 from maripepis.llm.claude_code_provider import ClaudeCodeProvider
 from maripepis.llm.factory import build_provider
-from maripepis.llm.ollama_provider import OllamaProvider
 
 
 def _cfg(backend: str) -> dict:
     return {
         "llm": {
             "backend": backend,
-            "ollama": {
-                "host": "http://localhost:11434",
-                "model": "llama3.1:8b",
-                "temperature": 0.7,
-            },
             "claude": {"model": "claude-opus-4-8", "max_tokens": 1024},
             "claude_code": {"model": "sonnet"},
         }
     }
 
 
-def test_construye_ollama():
-    p = build_provider(_cfg("ollama"))
-    assert isinstance(p, OllamaProvider)
-    assert "Ollama" in p.label
-    assert p.model == "llama3.1:8b"
+def test_el_motor_que_ya_no_esta_es_un_backend_desconocido():
+    """`ollama` en un config.toml viejo tiene que dar la cara al arrancar.
+
+    Es la única forma de que quien actualice se entere: si se cayera al motor por
+    defecto sin decir nada, maripepis contestaría por la nube a alguien que la
+    había configurado para no salir del equipo.
+    """
+    with pytest.raises(ValueError, match="claude"):
+        build_provider(_cfg("ollama"))
 
 
 def test_construye_claude_code(monkeypatch):
@@ -47,8 +45,8 @@ def test_backend_desconocido():
 
 def test_claude_sin_clave_no_llega_a_existir(monkeypatch):
     # El SDK se construye sin clave y no protesta hasta la primera petición: con
-    # el switch de la ventana eso significa ponerse en «Claude» y enterarte al
-    # hablar, que es cuando no estás mirando la pantalla.
+    # el cambio de motor en caliente eso significa quedarse en «Claude» y
+    # enterarte al hablar, que es cuando no estás mirando la pantalla.
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
 

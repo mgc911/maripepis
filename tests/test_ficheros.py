@@ -73,7 +73,7 @@ def test_pide_lo_que_le_falta(home):
 
 def test_esquema_para_los_proveedores():
     tool = build_file_tool()
-    esquema = tool.to_ollama()["function"]["parameters"]
+    esquema = tool.to_claude()["input_schema"]
     assert esquema["required"] == ["ruta", "contenido"]
     assert "añadir" in esquema["properties"]["modo"]["enum"]
 

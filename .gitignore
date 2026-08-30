@@ -20,6 +20,9 @@ models/
 # Memoria permanente: datos personales (ver maripepis/memory.py)
 memoria.md
 
+# Agenda de WhatsApp: teléfonos de otra gente (ver maripepis/tools/whatsapp.py)
+contactos.toml
+
 # Caché de herramientas
 .pytest_cache/
 .ruff_cache/

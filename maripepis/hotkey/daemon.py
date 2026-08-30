@@ -37,9 +37,9 @@ IDLE = "idle"
 RECORDING = "recording"
 PROCESSING = "processing"
 # Entre transcribir y hablar hay un hueco que antes no se contaba: el LLM
-# trabajando. Con Ollama eran décimas y daba igual decir ya «hablando»; con
-# Claude Code, que piensa y se va a internet antes de abrir la boca, son diez
-# segundos largos en los que la ventana juraba estar hablando y no se oía nada.
+# trabajando. Claude Code piensa y se va a internet antes de abrir la boca, así
+# que son diez segundos largos en los que la ventana juraba estar hablando y no
+# se oía nada.
 THINKING = "thinking"
 SPEAKING = "speaking"
 
@@ -103,9 +103,9 @@ class HotkeyDaemon:
         self._running = False
         self._subscribers: list[socket.socket] = []   # ventanas de chat mirando
         self._window_launch = 0.0
-        #: Motor en uso. Se puede cambiar en caliente (orden `backend`, switch de
-        #: la ventana); de ahí que se guarde aparte y no se lea de `cfg` cada vez.
-        self._backend = str(cfg.get("llm", {}).get("backend", "ollama"))
+        #: Motor en uso. Se puede cambiar en caliente (orden `backend`); de ahí
+        #: que se guarde aparte y no se lea de `cfg` cada vez.
+        self._backend = str(cfg.get("llm", {}).get("backend", BACKENDS[0]))
 
     # ── estado ───────────────────────────────────────────────────────────
 
@@ -522,9 +522,9 @@ class HotkeyDaemon:
             self._fallo("El motor LLM no responde")
             return
 
-        # La vía de herramientas (`run_tools_turn`, Ollama) no da tokens: no ha
-        # pasado por `al_token` y el estado seguiría en «pensando» mientras Piper
-        # lee la respuesta entera.
+        # La vía de herramientas (`run_tools_turn`) no da tokens: no ha pasado
+        # por `al_token` y el estado seguiría en «pensando» mientras Piper lee la
+        # respuesta entera.
         self._marcar_hablando(turno)
 
         self.logger.info("Maripepis: %s", reply)

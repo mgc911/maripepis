@@ -1,9 +1,15 @@
 # Maripepis 🐙
 
-Asistente de voz local para Linux con **proveedor de LLM intercambiable**:
-[Ollama](https://ollama.com) (local, offline), **Claude por API** (nube, de pago
-por token) o **Claude con tu suscripción** (vía Claude Code), cambiando una sola
-línea de `config.toml`. Diseño completo en [`ARQUITECTURA.md`](ARQUITECTURA.md).
+Asistente de voz para Linux. La voz, el oído y las acciones son de tu equipo;
+quien piensa es **Claude**, por dos caminos que se pagan distinto: **tu
+suscripción** (vía Claude Code, sin clave) o la **API por token**, cambiando una
+sola línea de `config.toml`. Diseño completo en
+[`ARQUITECTURA.md`](ARQUITECTURA.md).
+
+> **Lo que sale del equipo.** Hubo un motor local (Ollama) y ya no está: hoy lo
+> que dices se transcribe aquí, pero el texto viaja a la nube de Anthropic en
+> los dos backends. Lo que no viaja: el audio, los teléfonos de tu agenda de
+> WhatsApp (al modelo se le pasan los nombres) y nada de lo que no le cuentes.
 
 > **Estado:** completo + **acciones** + **tecla de hablar**. Habla mientras
 > genera, palabra de activación, frases de salida, barge-in, servicio systemd, y
@@ -16,32 +22,23 @@ línea de `config.toml`. Diseño completo en [`ARQUITECTURA.md`](ARQUITECTURA.md
 python -m venv .venv
 source .venv/bin/activate            # fish: source .venv/bin/activate.fish
 
-pip install -e .                     # backend Ollama (por defecto)
+pip install -e .                     # backend claude-code (por defecto): usa el
+                                     # CLI de Claude Code, no necesita nada más
 pip install -e ".[claude]"           # además, backend Claude por API
-                                     # (el backend claude-code no necesita nada:
-                                     #  usa el CLI de Claude Code)
 pip install -e ".[dev]"              # además, pytest
 ```
 
 ## Uso (Fase 1 — chat de texto)
 
-### Con Ollama (local, por defecto)
-
-```bash
-ollama serve                         # en otra terminal
-ollama pull qwen2.5:7b               # buen tool-calling y español (por defecto)
-python -m maripepis
-```
-
-### Con Claude (nube)
+### Con Claude por API
 
 ```bash
 set -x ANTHROPIC_API_KEY sk-ant-...   # fish (bash: export ANTHROPIC_API_KEY=...)
 python -m maripepis --backend claude  # o pon backend = "claude" en config.toml
 ```
 
-> ⚠️ Con Claude, el texto de tus mensajes se envía a la nube de Anthropic. El
-> backend Ollama es 100 % offline.
+> ⚠️ El texto de tus mensajes se envía a la nube de Anthropic. Aquí se paga por
+> token; con la suscripción (abajo) no, y es el modo por defecto.
 
 ### Con tu suscripción de Claude (sin clave de API)
 
@@ -91,20 +88,11 @@ Edita `config.toml`:
 
 ```toml
 [llm]
-backend = "ollama"   # ollama | claude | claude-code
+backend = "claude-code"   # claude-code | claude
 ```
 
-O al vuelo con `--backend {ollama,claude,claude-code}`. El resto del programa no
-cambia: los tres proveedores cumplen el mismo contrato (`llm/base.py`).
-
-> **`[llm.ollama] context`** (por defecto `8192`) no es un ajuste de relleno. El
-> servidor de Ollama da **4096 tokens a todo el mundo**, y aquí no llegan: solo
-> el system prompt con la memoria y las descripciones de las herramientas ya
-> ronda los 2500, y encima van el historial y lo que devuelven las herramientas.
-> Al pasarse, el contexto se recorta por el principio, la conversación deja de
-> tener la forma que el modelo espera y empieza a **decirte el comando en voz
-> alta en lugar de ejecutarlo** —o a soltar una palabra suelta sin sentido—. Con
-> VRAM de sobra puedes subirlo a `16384`; `0` deja lo que diga el servidor.
+O al vuelo con `--backend {claude-code,claude}`. El resto del programa no cambia:
+los dos proveedores cumplen el mismo contrato (`llm/base.py`).
 
 ## Voz de salida (Fase 2 — Piper)
 
@@ -151,7 +139,7 @@ pulsa **Ctrl-C** para terminar. Ajusta la sensibilidad en `config.toml`:
 > El ciclo es secuencial (escucha → responde → escucha), así el micro no capta
 > la voz del asistente. Interrumpir hablando (*barge-in*) llegaría en una Fase 5.
 
-## Acciones: abrir apps, buscar, leer y escribir ficheros, ejecutar comandos
+## Acciones: abrir apps, buscar, leer y escribir ficheros, ejecutar comandos, WhatsApp
 
 Con `[tools] enabled = true` (por defecto), el asistente puede **ejecutar
 acciones** cuando se lo pides — el LLM decide cuándo (tool-calling):
@@ -167,14 +155,18 @@ acciones** cuando se lo pides — el LLM decide cuándo (tool-calling):
   que le hayas dictado dentro.
 - *"Revisa el resumen que me hiciste y actualízalo"* → lo **lee**, y lo reescribe
   con lo que haya que cambiar.
+- *"Mándale un wasap a mi hermana diciendo que llego tarde"* → le abre el chat en
+  WhatsApp con el mensaje **escrito**, para que le des a enviar tú. (Con sesión
+  propia lo envía ella, pero antes te lee a quién va y qué pone, y espera tu «sí»
+  — y si te arrepientes, *"bórralo"* lo retira.)
 - *"¿Cuánto es 7×8?"* / *"capital de Italia"* → responde directo, sin abrir nada.
 
 Hace las cosas en vez de explicarte cómo hacerlas: si te pide algo que puede
 hacer con una herramienta, la usa y te cuenta el resultado; no te dicta comandos
 para que los escribas tú.
 
-**Tus carpetas se llaman como se llaman.** Un modelo pequeño escribe
-`~/Downloads` y `~/Desktop` porque es lo que ha visto un millón de veces; en un
+**Tus carpetas se llaman como se llaman.** El modelo escribe `~/Downloads` y
+`~/Desktop` porque es lo que ha visto un millón de veces; en un
 sistema en español eso son dos carpetas nuevas y vacías al lado de las de verdad,
 y el fichero que pediste acaba donde no lo busca nadie. Maripepis lee tus
 carpetas reales de `~/.config/user-dirs.dirs` (las mismas que ve el gestor de
@@ -197,25 +189,26 @@ Lo dicho en voz alta es un resumen, y de un resumen no se puede auditar nada: si
 la carpeta acabó donde no era, esta línea es la que lo enseña. (Del contenido de
 un fichero solo sale la ruta: el documento entero no cabe en una línea.)
 
-**Y si algo falla, te lo dice.** Un modelo de 7B lee que la herramienta ha
-fallado y remata igualmente con un «ya lo tienes»: por escrito cantaría, pero
-hablando, y sin ver la pantalla, no hay forma de distinguirlo. Maripepis se queda
-con lo que la herramienta hizo de verdad y añade un aviso cuando la respuesta no
-lo reconoce.
+**Y si algo falla, te lo dice.** Un modelo lee que la herramienta ha fallado y
+remata igualmente con un «ya lo tienes»: por escrito cantaría, pero hablando, y
+sin ver la pantalla, no hay forma de distinguirlo. Maripepis se queda con lo que
+la herramienta hizo de verdad y añade un aviso cuando la respuesta no lo
+reconoce.
 
 **Y si no ha hecho nada, también.** Hay una mentira peor que esa, y es la que
 sale en una conversación larga: el modelo **no llama a ninguna herramienta** y
 narra el éxito igual («he actualizado el archivo»). No hay ningún fallo que
 enseñar, porque no se llegó a intentar nada, y el fichero se queda como estaba.
 Maripepis cuenta las llamadas del turno: si son cero y la respuesta presume de
-haber hecho algo, lo desmiente en voz alta. Y si el modelo se queda en el anuncio
-(*«ahora voy a actualizarlo»*) sin llegar a llamar, le insiste una vez antes de
-dar el turno por terminado.
+haber hecho algo, lo desmiente en voz alta.
 
-> **Requiere un LLM con tool-calling.** Por defecto usa **`qwen2.5:7b`** (fiable
-> y bueno en español). `llama3.1:8b` también lo hace, pero **sobre-dispara**
-> (abre el navegador para cualquier pregunta). Con Claude también funciona.
-> Añade tus propias acciones en `maripepis/tools/system.py`.
+> Todo esto se midió contra modelos locales de 7B, que mentían así a diario. Ese
+> motor ya no está y con Claude pasa mucho menos, pero los desmentidos se quedan:
+> «mucho menos» no es «nunca», y quien escucha sigue sin ver la pantalla.
+
+> **Con `backend = "claude"`** el modelo usa estas herramientas; con
+> `claude-code`, las suyas (ver arriba). Añade las tuyas en
+> `maripepis/tools/system.py`.
 
 Solo abre **aplicaciones instaladas**: si le pides una que no tienes, te lo dice
 en vez de dar por hecho que la ha abierto (comprueba el binario en el `PATH` o su
@@ -233,41 +226,40 @@ directorio del servicio.
 > Con `follow_mouse = 1` eso es **donde esté el ratón**, que no siempre es donde
 > estás mirando. Si te sale en la otra pantalla, es eso.
 
-### Cambiar de motor con un clic
+### Cambiar de motor sin reiniciar
 
-La ventana de chat lleva un **switch en la cabecera**: apagado es el modelo local
-(`🏠 local`, Ollama), encendido es `☁️ Claude`. Cambia el motor **en caliente**,
-sin reiniciar el servicio y **sin perder la conversación** —el historial es
-neutro, así que se sigue por donde ibas pero con el otro modelo—.
-
-Lo mismo desde la terminal, que para eso es una orden del protocolo:
+La cabecera de la ventana dice **quién está contestando** (`☁️ Claude Code` o
+`☁️ Claude`). Es una etiqueta, no un mando: el motor se elige en `config.toml`, y
+se cambia en caliente desde la terminal, que para eso es una orden del protocolo:
 
 ```bash
-maripepis-hotkey backend claude       # o: ollama | claude-code
+maripepis-hotkey backend claude       # o: claude-code
 maripepis-hotkey status               # dice en cuál está
 ```
+
+El cambio es **sin reiniciar el servicio y sin perder la conversación** —el
+historial es neutro, así que se sigue por donde ibas pero con el otro motor—. Que
+sirva de algo teniendo los dos el mismo modelo detrás: son dos formas de pagarlo,
+y cuando se te agota una, saltas.
 
 Tres detalles que importan:
 
 - **Si el motor nuevo no se puede montar, no se cambia.** El backend `claude`
   necesita `ANTHROPIC_API_KEY`; sin ella el proveedor ni llega a existir, el
-  switch vuelve solo a su sitio y la ventana te dice por qué. Antes esto se
-  descubría al hablar, que es justo cuando no estás mirando la pantalla.
+  viejo sigue en su sitio y la ventana te dice por qué. Antes esto se descubría
+  al hablar, que es justo cuando no estás mirando la pantalla.
 - **A mitad de turno, no.** Si está grabando o pensando, la orden devuelve
   «ocupado» y el motor se queda como está.
-- **Todas las ventanas se enteran.** El cambio viaja como evento, así que si
-  tienes dos abiertas (o lo cambias por terminal) los switches se ponen de
-  acuerdo solos.
+- **Todas las ventanas se enteran.** El cambio viaja como evento, así que la
+  cabecera de las que tengas abiertas se actualiza sola.
 
 > Con `claude` (API) mantienes **todas** las herramientas de maripepis, y se paga
 > por token. Con `claude-code` usas tu suscripción sin clave, pero ese backend
 > trae las suyas y las de `[tools]` no le llegan: pasa a ser conversación a
 > secas, salvo que le des las de Claude Code (ver arriba).
 
-**`🧠 pensando…` es un estado de verdad, no un adorno.** Con Ollama la respuesta
-empieza en décimas y daba igual dar por hecho que ya estaba hablando; Claude Code
-piensa y se va a internet **antes** de abrir la boca, y eso son diez o treinta
-segundos. Así que el salto a `🗣️ hablando…` lo dispara el primer trozo de
+**`🧠 pensando…` es un estado de verdad, no un adorno.** Claude Code piensa y se
+va a internet **antes** de abrir la boca, y eso son diez o treinta segundos. Así que el salto a `🗣️ hablando…` lo dispara el primer trozo de
 respuesta, no el principio del turno, y por el camino se van pintando las
 herramientas que usa (`⚙️ WebSearch · tiempo Sevilla mañana`, y en rojo las que
 fallan). Sin eso, un turno con búsqueda era medio minuto de ventana congelada
@@ -327,6 +319,202 @@ cielo, lluvia y viento, y el detalle cada tres horas si lo pides. Sale de
 búsqueda porque es de lo que más se pregunta hablando y porque la enciclopedia no
 sabe qué tiempo hará el jueves. Más de tres días no hay: si pides «la semana», lo
 dice en vez de rellenar el resto.
+
+### WhatsApp: el mensaje se queda escrito
+
+*"Mándale un wasap a Marta diciendo que llego en diez minutos"* → te abre su chat
+en [ZapZap](https://github.com/rafatosta/zapzap) con el mensaje **escrito en el
+cuadro de texto**. Y ahí se para: **no lo envía**.
+
+Eso es el modo por defecto (`modo = "borrador"`), y hay otro que lo envía de
+verdad — más abajo. Pero el que viene puesto es este, y por algo:
+
+No es que no se pueda. Es que de todo lo que hace Maripepis, esta es la única
+acción que **sale del equipo y le llega a otra persona**, y la única que no se
+deshace: una carpeta mal creada se borra, un mensaje enviado no se retira. Quien
+lo pide hablando no está mirando la pantalla mientras habla — el Enter es
+justamente el momento en que la mira, ve a quién va y ve qué pone. Así, que el
+micrófono entienda *Marta* donde dijiste *Marcos* es un mensaje que no llegas a
+enviar, en vez de uno que ya no puedes retirar.
+
+Y lo dice, además de hacerlo: si el modelo remata el turno con un *"ya se lo he
+mandado"*, se le desmiente en voz alta. Esa mentira es cara — te quedas esperando
+una respuesta a un mensaje que sigue en el cuadro de texto.
+
+**La agenda es tuya y va aparte.** La libreta de WhatsApp vive dentro de la sesión
+del navegador de ZapZap y desde fuera no se lee, así que los nombres salen de un
+fichero propio, `~/.config/maripepis/contactos.toml`:
+
+```toml
+marta = "+34600112233"
+"mi hermana" = "+34600112233"     # varios nombres, un número: vale cualquiera al hablar
+pepe = "600998877"                # 9 cifras → se le pone el prefijo de [tools.whatsapp]
+
+[grupos]                          # al final del fichero, y solo con modo = "envio"
+familia = "120363021234567890@g.us"
+```
+
+> Los nombres con espacios, **entre comillas**: sin ellas el TOML no es válido y la
+> agenda se queda a cero. Si pasa, te lo dice con esas palabras en vez de
+> mandarte a crear una agenda que ya tienes.
+
+Va fuera del repositorio a propósito (`.gitignore`): son teléfonos de otra gente.
+Al modelo se le pasan **los nombres, nunca los números** — esa lista viaja en cada
+petición, y con el backend de Claude eso es la nube.
+
+Lo que no hace, por si acaso:
+
+- **No se inventa un teléfono.** Si le pides escribir a alguien que no está en la
+  agenda, lo dice y te recuerda a quién sí tienes apuntado.
+- **No elige entre dos Martas.** Si encajan varias, pregunta.
+- **No confunde a Ana con Juana**: compara por palabras enteras.
+- **No da el mensaje por escrito si ZapZap estaba cerrado.** Un enlace a una
+  aplicación cerrada se pierde (su `SingleApplication` solo lo mira si ya hay una
+  instancia abierta), así que te la abre y te dice que se lo pidas otra vez.
+
+| `[tools.whatsapp]` | Para qué |
+|---|---|
+| `enabled = true` | `false` y el asistente no puede abrirle el chat a nadie. |
+| `modo = "borrador"` | `"envio"` y lo manda de verdad, por sesión propia, tras leértelo y preguntar. Ver abajo. |
+| `agenda = ""` | Vacío = `~/.config/maripepis/contactos.toml`. Ahí van también los grupos, en `[grupos]`. |
+| `prefijo = "34"` | Prefijo de país para los números de 9 cifras. Lo que empieza por `+` o `00` se respeta tal cual. |
+| `cliente = "zapzap"` | Quien abre WhatsApp; tiene que entender un `whatsapp://` en la línea de órdenes. |
+
+#### Si quieres que lo envíe de verdad: `modo = "envio"`
+
+Con sesión propia de WhatsApp, Maripepis lo manda ella: no hay chat en pantalla,
+ni Enter, ni marcha atrás. Y por el mismo camino se pueden abrir grupos, que un
+enlace `whatsapp://` nunca pudo tocar porque un grupo no tiene teléfono.
+
+Como ahí ya no hay pantalla que mirar, **el freno se muda a la conversación**: va
+en dos turnos, y en medio hablas tú.
+
+> — *Mándale un wasap a Edu diciendo que llego en diez.*
+> — *A Edu: «llego en diez». ¿Te lo mando?*
+> — *Sí.*
+> — *Enviado.*
+
+El primer turno no manda nada: deja el mensaje preparado y te lee **a quién va y
+qué pone**. El segundo lo suelta. Y son dos herramientas de verdad, no una con un
+paso de más: la de confirmar **no lleva ni destinatario ni texto**, así que lo
+único que el modelo puede hacer con ella es soltar lo que tú acabas de oír — no
+hay hueco por donde se cuele una Marta que nadie ha nombrado. Tampoco vale que se
+conteste a sí mismo: las dos llamadas tienen que venir de turnos distintos, y
+entre dos turnos solo se pasa hablando. Si dices que no, o cambias el mensaje, se
+prepara otra vez; y si te vas a hacer otra cosa, el mensaje preparado caduca al
+minuto.
+
+Eso es lo que le devuelve al usuario lo que le quitó el envío directo: enterarse
+**antes** de a quién le va a llegar qué. Si el micrófono entendió «Marcos» donde
+dijiste «Marta», se oye — y basta con no decir que sí.
+
+##### Grupos
+
+Por este camino sí se puede escribir a un **grupo**, que un enlace `whatsapp://`
+nunca pudo tocar: un grupo no tiene teléfono, tiene un identificador que solo se
+ve desde dentro de la sesión. Se apuntan a mano en `[grupos]`, y el identificador
+te lo dice la propia maripepis:
+
+```bash
+maripepis-wa grupos familia          # busca por parte del nombre
+  "120363021234567890@g.us"   # Familia Guevara
+```
+
+El filtro es obligatorio a propósito: esta cuenta está en **269 grupos**, y esa
+lista no es una agenda, es un listín — que además acabaría viajando al modelo en
+cada frase. Apunta los tres o cuatro a los que de verdad escribes.
+
+Cuando el mensaje va a un grupo, la confirmación lo dice: *«va **al grupo**
+Familia y dice…»*. No es un adorno — es la diferencia entre que lo lea una
+persona y que lo lean doce, y sin ver la pantalla no hay otra forma de notarlo. Y
+si tienes una persona y un grupo apuntados con el mismo nombre, no elige: pregunta.
+
+##### «No, bórralo»
+
+Y si aun así sale lo que no era, se retira hablando:
+
+> — *Mándale un wasap a Edu diciendo que llego en diez.*
+> — *A Edu: «llego en diez». ¿Te lo mando?*
+> — *Sí… ¡uy, no! Bórralo.*
+> — *Borrado.*
+
+Una sola herramienta para las dos situaciones, porque tú no tienes por qué
+distinguirlas: si el mensaje **solo estaba preparado**, lo descarta y no llega a
+salir nada; si **ya había salido**, le pide a WhatsApp el «eliminar para todos».
+Tampoco lleva argumentos —siempre es el último— y aquí **no hay confirmación que
+valga**: retirar es el lado seguro, y lo peor que puede pasar por hacerte caso de
+más es tener que mandar el mensaje otra vez.
+
+> Dos cosas que no se prometen: WhatsApp solo deja retirar un mensaje **durante
+> un rato**, y cuando dice que no, te lo dice con esas palabras en vez de dejarlo
+> en el aire. Y aunque lo retire, **el otro puede haberlo leído antes** — eso no
+> lo sabe nadie.
+
+```bash
+pip install -e '.[whatsapp]'                       # neonize (bindings de whatsmeow)
+maripepis-wa vincular                              # QR: móvil → Dispositivos vinculados
+cp packaging/maripepis-whatsapp.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now maripepis-whatsapp
+maripepis-wa estado                                # ¿viva la sesión?
+```
+
+Luego, en `config.toml`, `modo = "envio"`.
+
+Vive en un servicio aparte porque la biblioteca se queda con el hilo para siempre
+(su `connect()` no vuelve nunca), y porque son dos cosas que fallan por motivos
+distintos: que WhatsApp pierda la sesión no tiene por qué llevarse por delante la
+tecla de hablar. En el móvil, el dispositivo vinculado aparece como
+**«Firefox (Linux)»**.
+
+**Lo que sigue igual:** la agenda, el «no me invento teléfonos», el «no elijo entre
+dos Martas» y el tope de texto. Equivocarse de persona es el mismo error se envíe
+o se deje escrito, así que esas barandillas las comparten los dos modos — y valen
+igual para los grupos.
+
+**Lo que cambia:** donde había una herramienta hay tres —
+`preparar_mensaje_whatsapp`, que redacta; `enviar_mensaje_whatsapp`, que confirma;
+y `borrar_mensaje_whatsapp`, que se arrepiente— y el desmentido se reparte con
+ellas. Mientras el mensaje solo esté
+preparado, un «ya se lo he mandado» se sigue desmintiendo en voz alta, pero
+diciendo lo que toca hacer ahora («lo tengo preparado, dime que sí»); una vez
+confirmado, «se lo he enviado» es verdad y desmentirlo sería la misma mentira del
+revés.
+
+**Y lo que asumes**, dicho sin adornos: es un cliente no oficial sobre tu número
+personal, así que hay un riesgo pequeño pero real de bloqueo de cuenta; el fichero
+de sesión (`~/.local/share/maripepis/whatsapp/`) es tu WhatsApp entero para quien
+lo copie, y por eso se crea en 600; y un fallo del micrófono ya no se queda en un
+mensaje sin enviar. Lo único que te queda entonces es el «eliminar para todos» de
+WhatsApp, y dura un rato.
+
+**Con el backend `claude-code` va por otro sitio.** Ese proveedor trae sus propias
+herramientas y las de maripepis no le llegan (`accepts_tools = False`), así que no
+vale con activarla: no existiría. Si tiene `Bash` en `[llm.claude_code] tools`, se
+le pasa en el *system prompt* **la orden hecha**, y la ejecuta él:
+
+```bash
+maripepis-whatsapp "Edu" "llego tarde"    # en el bin/ del venv
+maripepis-whatsapp --enviar               # solo en modo envío: el «sí» del usuario
+maripepis-whatsapp --borrar               # y el «no, espera»
+```
+
+Es la misma herramienta —misma agenda, mismo «no me invento teléfonos», mismo «NO
+está enviado»—, solo que llamada por la shell. Se le da la orden y no la receta a
+propósito: contarle que ZapZap entiende enlaces `whatsapp://` acaba en un enlace
+montado a mano con un teléfono inventado. Sin `Bash` no se le cuenta nada, y queda
+dicho en el log al arrancar.
+
+Los dos pasos del modo envío también son dos por aquí, y con el mismo freno: cada
+turno del CLI lleva su marca en el entorno (`MARIPEPIS_TURNO`), la hereda todo lo
+que lance con su `Bash`, y el `--enviar` de la misma vuelta que el `preparar` no
+manda nada. El mensaje que espera vive mientras tanto en un fichero de
+`$XDG_RUNTIME_DIR`, en 600, que es lo que permite que dos procesos distintos sean
+los dos pasos de una misma conversación.
+
+> Lo que sí se pierde por ahí es el desmentido en voz alta: `desmiente_envio` vive
+> en el turno con herramientas, y por esta vía no pasa. Queda la orden del *system
+> prompt* y el «NO está enviado» que devuelve la propia orden.
 
 ### Comandos de zsh
 
@@ -392,9 +580,9 @@ systemd). Tras editarlo: `systemctl --user restart maripepis`.
 > y, con los backends Claude, gasta dinero o cuota de suscripción. Lo que pongas entre `<!-- -->` no se
 > le manda al modelo: son notas para ti.
 >
-> `memoria.md` está en `.gitignore` porque son datos personales. Y con
-> `backend = "claude"` o `"claude-code"` viajan a la nube en cada turno; con
-> Ollama no salen del PC.
+> `memoria.md` está en `.gitignore` porque son datos personales. Y viajan a la
+> nube en cada turno, con los dos backends: no pongas ahí nada que no le
+> contarías a Anthropic.
 
 ## Pulido (Fase 5)
 
@@ -494,9 +682,9 @@ sin usarlo.
   estar, la única vía es `hyprctl dispatch sendshortcut`, y al soltar todavía
   tienes ALT+SHIFT pulsados. El modo de fallo es un modificador pegado que
   inutiliza el escritorio. Pega tú con **SUPER+V**.
-- **Privacidad:** con `[llm] backend = "claude"` o `"claude-code"`, cada ALT+Z manda la
-  transcripción a la nube. Una tecla global hace las capturas accidentales mucho
-  más probables que una terminal; el backend Ollama es 100 % local.
+- **Privacidad:** cada ALT+Z manda la transcripción a la nube, con los dos
+  backends. Una tecla global hace las capturas accidentales mucho más probables
+  que una terminal: lo que se grabe por error también sale del equipo.
 - **VRAM:** el demonio deja `large-v3-turbo` residente (~2 GB). Para liberarla,
   `systemctl --user stop maripepis`.
 
@@ -567,8 +755,8 @@ De qué ficheros se entera:
 
 | Motor | Cómo llega al fichero | ¿Se ve? |
 |---|---|---|
-| `ollama` / `claude` | `escribir_fichero`, `leer_fichero` | sí |
-| `ollama` / `claude` | `ejecutar_comando` con `echo … > x` o `cat x` | no |
+| `claude` | `escribir_fichero`, `leer_fichero` | sí |
+| `claude` | `ejecutar_comando` con `echo … > x` o `cat x` | no |
 | `claude-code` | su `Write`, `Edit`, `Read` | sí |
 | `claude-code` | su `Bash` con `cat > x << EOF` o `cat x` | no |
 
@@ -633,8 +821,8 @@ socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/maripepis.sock   # {"cmd": "subscribe"}
   dijo que no. Es lo único que hay para comprobar lo que ha tocado de verdad,
   porque de viva voz solo llega el resumen.
 - **La respuesta se escribe según se genera** solo cuando el turno va en
-  streaming. Con `[tools] enabled = true` y Ollama, el turno de herramientas no
-  va en streaming (`stream: false`) y la respuesta aparece de una vez.
+  streaming. Con `[tools] enabled = true` y el backend `claude`, el turno de
+  herramientas no va en streaming y la respuesta aparece de una vez.
 - **El dictado (ALT+SHIFT+Z) no abre ventana**: va al portapapeles y ni pasa por
   el LLM. Si la ventana ya está abierta, solo apunta que ha copiado.
 - **Si la cierras, la siguiente pulsación la vuelve a abrir** (y solo una: entre

@@ -1,11 +1,18 @@
-# Maripepis — Asistente de voz local con Ollama
+# Maripepis — Asistente de voz para Linux
 
 Asistente de voz para Linux: captura audio del micrófono, lo transcribe a texto
 (STT), genera una respuesta con un LLM y la reproduce por voz (TTS). El "cerebro"
-es un **proveedor intercambiable**: **Ollama** (local, 100 % offline, por
-defecto), **Claude por API** o **Claude con tu suscripción** (vía el CLI de
-Claude Code), cambiando una sola línea de config.
-La captura y la síntesis de voz son siempre locales.
+es un **proveedor intercambiable**, aunque hoy los dos que hay son el mismo
+modelo por dos caminos que se pagan distinto: **Claude con tu suscripción** (vía
+el CLI de Claude Code, por defecto) y **Claude por API**, cambiando una sola
+línea de config. La captura y la síntesis de voz son siempre locales; el texto
+no.
+
+> Hubo un tercer proveedor, **Ollama**, que hacía todo esto sin salir del equipo.
+> Se quitó, y con él la única forma de usar maripepis sin nube. Lo que queda de
+> aquello son las cicatrices que se señalan por aquí abajo: las listas de frases
+> de `veracidad.py`, medidas contra modelos de 7B, y `[tools]`, que existe porque
+> un modelo pequeño necesitaba que se lo dieran todo hecho.
 
 ---
 
@@ -13,7 +20,7 @@ La captura y la síntesis de voz son siempre locales.
 
 ```
 ┌──────────┐   ┌──────────┐   ┌───────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-│ Micrófono│──▶│   VAD    │──▶│    STT    │──▶│  Ollama  │──▶│   TTS    │──▶│ Altavoz  │
+│ Micrófono│──▶│   VAD    │──▶│    STT    │──▶│  Claude  │──▶│   TTS    │──▶│ Altavoz  │
 │ (arecord)│   │ (silencio│   │ (Whisper) │   │  (LLM)   │   │ (Piper)  │   │ (aplay)  │
 │          │   │  detect) │   │  audio→txt│   │ txt→txt  │   │ txt→audio│   │          │
 └──────────┘   └──────────┘   └───────────┘   └──────────┘   └──────────┘   └──────────┘
@@ -23,7 +30,7 @@ La captura y la síntesis de voz son siempre locales.
 1. **Captura**: se graba del micro hasta detectar fin de habla.
 2. **VAD** (Voice Activity Detection): recorta silencios y decide cuándo cortar.
 3. **STT** (Speech-to-Text): Whisper convierte el audio en texto.
-4. **LLM**: Ollama recibe el texto + historial y genera la respuesta.
+4. **LLM**: Claude recibe el texto + historial y genera la respuesta.
 5. **TTS** (Text-to-Speech): Piper convierte la respuesta en audio.
 6. **Reproducción**: se reproduce por el altavoz.
 
@@ -40,7 +47,7 @@ Quién dispara el paso 1 depende del modo:
 
 ---
 
-## 2. Elección de tecnologías (todo local en Linux)
+## 2. Elección de tecnologías
 
 | Etapa            | Opción recomendada            | Alternativas                              | Por qué |
 |------------------|-------------------------------|-------------------------------------------|---------|
@@ -48,13 +55,13 @@ Quién dispara el paso 1 depende del modo:
 | Captura audio    | **sounddevice** (PortAudio)   | `arecord`/`pyaudio`                        | API limpia, arrays NumPy |
 | VAD              | **webrtcvad** o **silero-vad**| energía RMS simple                        | Corta cuando dejas de hablar |
 | STT              | **faster-whisper**            | `whisper.cpp`, `openai-whisper`, `vosk`   | Rápido en CPU/GPU, buen español |
-| LLM              | **Ollama** (local), **Claude** (API) o **Claude Code** (suscripción) | `gemma2`, `mistral`; otros modelos Claude | Proveedor intercambiable — ver §5 |
+| LLM              | **Claude Code** (suscripción) o **Claude** (API) | otros modelos Claude | Proveedor intercambiable — ver §5 |
 | TTS              | **Piper**                     | Coqui TTS, espeak-ng, Kokoro              | Voz natural, rápido, offline |
 | Reproducción     | **sounddevice** / `aplay`     | `ffplay`, `paplay`                        | Consistente con la captura |
 | Config           | **TOML** (`tomllib`)          | YAML, `.env`                              | Nativo en 3.11+ |
 
-> Con GPU NVIDIA, `faster-whisper` y Ollama usan CUDA automáticamente. En CPU
-> pura funciona igual, solo más lento.
+> Con GPU NVIDIA, `faster-whisper` usa CUDA automáticamente. En CPU pura
+> funciona igual, solo más lento.
 
 ---
 
@@ -92,6 +99,12 @@ maripepis/
 │   │   ├── window.py          # Arranque de la ventana de chat (otro Python)
 │   │   └── clipboard.py       # Portapapeles de Wayland (wl-copy)
 │   │
+│   ├── whatsapp/              # Sesión propia de WhatsApp (solo con modo = "envio")
+│   │   ├── __init__.py
+│   │   ├── protocol.py        # Órdenes JSON por socket unix; valida el destino
+│   │   ├── daemon.py          # Demonio: sostiene la sesión (neonize/whatsmeow)
+│   │   └── cliente.py         # pedir(): tres líneas y biblioteca estándar
+│   │
 │   ├── ui/                    # Ventana de chat (proceso aparte, GTK4)
 │   │   ├── __init__.py
 │   │   └── chat.py            # Visor: se suscribe al socket y pinta el turno
@@ -103,7 +116,6 @@ maripepis/
 │   ├── llm/
 │   │   ├── __init__.py
 │   │   ├── base.py            # Interfaz LLMProvider (contrato común)
-│   │   ├── ollama_provider.py # Implementación local (HTTP :11434)
 │   │   ├── claude_provider.py # Implementación nube (API Anthropic)
 │   │   ├── claude_code_provider.py # Implementación por suscripción (CLI Claude Code)
 │   │   ├── factory.py         # Elige proveedor según config.toml
@@ -115,7 +127,8 @@ maripepis/
 │   │
 │   └── utils/
 │       ├── __init__.py
-│       └── logging.py         # Logging con niveles
+│       ├── logging.py         # Logging con niveles
+│       └── turnos.py          # La marca del turno: qué llamadas son de la misma vuelta
 │
 ├── models/                    # Modelos descargados (git-ignored)
 │   ├── whisper/
@@ -127,7 +140,6 @@ maripepis/
 │
 └── tests/
     ├── test_vad.py
-    ├── test_ollama_client.py
     └── test_pipeline.py
 ```
 
@@ -152,10 +164,10 @@ maripepis/
 - Carga el modelo una sola vez (coste alto).
 - `transcribe(audio) -> str`. Configurable: idioma (`es`), tamaño (`base`, `small`, `medium`).
 
-### `llm/base.py`, `llm/ollama_provider.py`, `llm/claude_provider.py`, `llm/factory.py`
-- Definen y seleccionan el proveedor de LLM. Ambos hablan el **mismo contrato**
+### `llm/base.py`, `llm/claude_provider.py`, `llm/claude_code_provider.py`, `llm/factory.py`
+- Definen y seleccionan el proveedor de LLM. Todos hablan el **mismo contrato**
   (`stream_reply`) para que el resto del programa no sepa cuál está activo.
-- **Streaming** en ambos: empiezan a devolver texto antes de terminar, para ir
+- **Streaming** en todos: empiezan a devolver texto antes de terminar, para ir
   enviándolo al TTS y reducir la latencia percibida.
 - Detalle completo en **§5 (Estrategia de proveedores intercambiables)**.
 
@@ -202,30 +214,36 @@ maripepis/
 
 ---
 
-## 5. Estrategia de proveedores intercambiables (Ollama ↔ Claude)
+## 5. Estrategia de proveedores intercambiables
 
 El objetivo: **cambiar de motor con una sola línea de configuración**, sin tocar
 el resto del programa. Se resuelve con el patrón **Strategy + Factory**.
 
+Que hoy los dos proveedores sean Claude no hace inútil el contrato: son dos
+puertas distintas al mismo modelo —una API con SDK y un CLI del que se lee la
+salida— y no se parecen en nada por dentro. Una trae herramientas propias y la
+otra no; una se cobra por token y la otra va con la suscripción. El contrato es
+lo que hace que el resto del programa no tenga que enterarse de nada de eso.
+
 ### Idea central
 
-Todo el programa habla con un **contrato común** (`LLMProvider`). Existen dos
-implementaciones —una para Ollama, otra para Claude— y una *factory* que
-instancia la correcta leyendo `config.toml`. El `pipeline` ni se entera de cuál
-está activa.
+Todo el programa habla con un **contrato común** (`LLMProvider`). Hay una
+implementación por puerta y una *factory* que instancia la correcta leyendo
+`config.toml`. El `pipeline` ni se entera de cuál está activa.
 
 ```
-                         ┌───────────────────────┐
-        config.toml ────▶│   factory.build()     │
-     backend = "ollama"  └──────────┬────────────┘
-                                    │ devuelve un LLMProvider
-                 ┌──────────────────┴──────────────────┐
-                 ▼                                      ▼
-        ┌─────────────────┐                   ┌──────────────────┐
-        │ OllamaProvider  │                   │  ClaudeProvider  │
-        │  HTTP :11434    │                   │  API Anthropic   │
-        └─────────────────┘                   └──────────────────┘
-                 └──────────────┬───────────────────────┘
+                            ┌───────────────────────┐
+           config.toml ────▶│   factory.build()     │
+    backend = "claude-code" └──────────┬────────────┘
+                                       │ devuelve un LLMProvider
+                 ┌─────────────────────┴─────────────┐
+                 ▼                                    ▼
+      ┌──────────────────────┐              ┌──────────────────┐
+      │ ClaudeCodeProvider   │              │  ClaudeProvider  │
+      │  CLI `claude`,       │              │  API Anthropic   │
+      │  con la suscripción  │              │  (por token)     │
+      └──────────────────────┘              └──────────────────┘
+                 └──────────────┬───────────────────┘
                                 ▼
                    stream_reply(system, messages) -> Iterator[str]
                        (mismo contrato para ambos)
@@ -247,32 +265,8 @@ class LLMProvider(ABC):
 
 > **Formato neutro de mensajes:** `messages` es una lista de
 > `{"role": "user" | "assistant", "content": str}`, empezando por `user` y
-> alternando. El `system` va **aparte** (no como un mensaje). Este formato es el
-> mínimo común denominador de ambos proveedores.
-
-### Implementación Ollama (`llm/ollama_provider.py`)
-
-```python
-import json, httpx
-from .base import LLMProvider
-
-class OllamaProvider(LLMProvider):
-    def __init__(self, host, model, temperature):
-        self.host, self.model, self.temperature = host, model, temperature
-
-    def stream_reply(self, system, messages):
-        payload = {
-            "model": self.model,
-            # Ollama sí acepta el system como un mensaje con role "system"
-            "messages": [{"role": "system", "content": system}, *messages],
-            "stream": True,
-            "options": {"temperature": self.temperature},
-        }
-        with httpx.stream("POST", f"{self.host}/api/chat", json=payload) as r:
-            for line in r.iter_lines():
-                if line:
-                    yield json.loads(line)["message"]["content"]
-```
+> alternando. El `system` va **aparte** (no como un mensaje), que es como lo
+> quiere Claude y como lo aceptaría cualquier otro que se añadiera.
 
 ### Implementación Claude (`llm/claude_provider.py`)
 
@@ -329,14 +323,11 @@ Dos costuras propias de hablar con un CLI y no con una API:
 ### La factory (`llm/factory.py`)
 
 ```python
-from .ollama_provider import OllamaProvider
 from .claude_provider import ClaudeProvider
+from .claude_code_provider import ClaudeCodeProvider
 
 def build_provider(cfg) -> "LLMProvider":
     backend = cfg["llm"]["backend"]
-    if backend == "ollama":
-        o = cfg["llm"]["ollama"]
-        return OllamaProvider(o["host"], o["model"], o["temperature"])
     if backend == "claude":
         c = cfg["llm"]["claude"]
         return ClaudeProvider(c["model"], c["max_tokens"])
@@ -348,24 +339,25 @@ def build_provider(cfg) -> "LLMProvider":
 
 ### La diferencia que hay que normalizar
 
-| Aspecto | Ollama | Claude (API) | Claude Code (suscripción) |
-|---------|--------|--------------|---------------------------|
-| `system` prompt | mensaje con `role: "system"` | parámetro `system=` aparte | `--system-prompt` |
-| Orden de `messages` | flexible | **debe empezar por `user` y alternar** | no los acepta: van aplanados en el prompt |
-| Streaming | líneas JSON (`/api/chat`) | `client.messages.stream().text_stream` | `stream-json` por stdout del CLI |
-| Dónde corre | tu máquina | nube de Anthropic | nube de Anthropic (proceso local de por medio) |
-| Coste | gratis (tu hardware) | por tokens | tu cuota de suscripción |
-| Privacidad | **total, offline** | el texto transcrito **sale a la nube** | el texto transcrito **sale a la nube** |
-| Credencial | host + modelo | `ANTHROPIC_API_KEY` en el entorno | login de Claude Code (`/login`) |
-| Herramientas | las de maripepis | las de maripepis | **las suyas** (`accepts_tools = False`) |
+| Aspecto | Claude (API) | Claude Code (suscripción) |
+|---------|--------------|---------------------------|
+| `system` prompt | parámetro `system=` aparte | `--system-prompt` |
+| Orden de `messages` | **debe empezar por `user` y alternar** | no los acepta: van aplanados en el prompt |
+| Streaming | `client.messages.stream().text_stream` | `stream-json` por stdout del CLI |
+| Dónde corre | nube de Anthropic | nube de Anthropic (proceso local de por medio) |
+| Coste | por tokens | tu cuota de suscripción |
+| Privacidad | el texto transcrito **sale a la nube** | el texto transcrito **sale a la nube** |
+| Credencial | `ANTHROPIC_API_KEY` en el entorno | login de Claude Code (`/login`) |
+| Herramientas | las de maripepis | **las suyas** (`accepts_tools = False`) |
 
 El `conversation.py` mantiene el historial en el formato neutro y ya alterna
 `user`/`assistant`, así que ambos proveedores lo consumen sin cambios.
 
-> ⚠️ **Aviso de privacidad:** con `backend = "claude"` el audio (ya transcrito
-> a texto) se envía a un servicio externo. Esto rompe la promesa de "100 %
-> offline" del diseño base. La etapa de voz (Whisper/Piper) sigue siendo local;
-> solo el "cerebro" cambia. Deja esto claro al usuario en el README.
+> ⚠️ **Aviso de privacidad:** con los dos backends, el audio (ya transcrito a
+> texto) se envía a un servicio externo. La promesa de «100 % offline» del diseño
+> base se rompió el día que se quitó el motor local, y hoy ya no hay forma de
+> cumplirla. La etapa de voz (Whisper/Piper) sigue siendo local; el "cerebro" no.
+> Queda dicho en el README, en la primera pantalla.
 
 ---
 
@@ -377,38 +369,35 @@ comandos) usando el *tool-calling* del LLM: se le describen unas herramientas y
 
 ```
 maripepis/tools/
-├── base.py      # Tool: nombre, descripción, esquema, handler; to_ollama()/to_claude()
+├── base.py      # Tool: nombre, descripción, esquema, handler; to_claude()
 │                # + es_fallo(): el contrato de «esto NO se ha hecho»
 ├── system.py    # abrir_navegador, buscar_en_internet, abrir_aplicacion + build_default_tools()
 ├── carpetas.py  # las carpetas del usuario (XDG) y los nombres con que se piden
 ├── ficheros.py  # escribir_fichero: crear/añadir texto sin pasar por la shell
 ├── shell.py     # ejecutar_comando: zsh -lc, con veto + timeout + recorte de salida
+├── whatsapp.py  # borrador: deja el mensaje escrito; envío: lo prepara, lo manda
+│                # cuando el usuario dice que sí, y lo retira si se arrepiente
+│                # (tres herramientas; personas y grupos)
+├── lanzador.py  # lanzar(): proceso desligado, en su propio scope de systemd
 └── runner.py    # Acciones: ejecuta por nombre, registra y recuerda si algo falló
 ```
 
-- **Neutralidad de proveedor:** cada `Tool` se convierte al formato de Ollama o
-  Claude. El bucle agéntico (llamar → ejecutar → repetir → texto final) vive
-  **dentro** de `provider.run_tools_turn(...)`, encapsulando el hilo de mensajes
-  específico de cada proveedor. El historial neutro sigue siendo solo texto.
+- **Neutralidad de proveedor:** cada `Tool` se convierte al formato del que las
+  acepte (`to_claude()`). El bucle agéntico (llamar → ejecutar → repetir → texto
+  final) vive **dentro** de `provider.run_tools_turn(...)`, encapsulando el hilo
+  de mensajes específico de cada proveedor. El historial neutro sigue siendo solo
+  texto.
 - **Ejecución local:** los handlers lanzan procesos desligados (`xdg-open`,
   `gtk-launch`, comando directo). Sin `shell=True` (argv como lista, sin inyección).
 - **Fallback:** si el modelo no soporta herramientas, se responde en texto normal.
-- **Modelo:** el tool-calling exige un LLM capaz. **`qwen2.5:7b`** discrimina bien;
-  `llama3.1:8b` sobre-dispara. La temperatura del turno con herramientas se baja
-  (≤0.3) para decisiones más fiables.
 - **Ampliar:** añade un `Tool` en `system.py` y aparece disponible automáticamente.
-- **Contexto:** `[llm.ollama] context` (8192) va explícito en cada petición. El
-  servidor de Ollama da 4096 a todo el mundo y el prompt con memoria y
-  herramientas ya ronda los 2500: al pasarse, el contexto se recorta por el
-  principio, la conversación pierde la forma que el modelo espera y responde con
-  la llamada **escrita en el texto** —que acaba dicha en voz alta— o con una
-  palabra suelta. Es el fallo que más se parecía a «no hace nada».
-- **Llamadas rescatadas:** aun así, un 7B escribe a veces la llamada en el texto y
-  Ollama la deja pasar. `rescatar_llamadas()` la saca de ahí (decodificando el
-  JSON de verdad, que lleva llaves anidadas) y la ejecuta en vez de leerla.
-- **Turnos mudos:** Ollama devuelve de vez en cuando contenido vacío y sin
-  llamadas, y maripepis se quedaba callada. Se reintenta subiendo un poco la
-  temperatura, porque repetir la misma petición igual da el mismo silencio.
+- **De dónde viene tanta desconfianza:** casi todo lo que rodea a las
+  herramientas —el registro de `Acciones`, los desmentidos de `veracidad.py`, las
+  descripciones que repiten «no digas que lo has hecho si no lo has hecho»— se
+  midió contra modelos locales de 7B, que narraban el éxito de acciones que no
+  habían ejecutado. Ese motor ya no está y con Claude pasa mucho menos, pero se
+  queda: quien escucha sigue sin ver la pantalla, y ahí una mentira no se
+  distingue de que funcione.
 - **Actuar, no explicar:** el *system prompt* de las herramientas ordena usarlas y
   contar el resultado. Sin esa frase, ante «créame una carpeta» el modelo contesta
   con un `mkdir` **para que lo escriba el usuario** — inútil si lo estás pidiendo
@@ -479,6 +468,215 @@ Además: `stdin` a `/dev/null` (lo interactivo falla rápido en vez de robarle e
 teclado a la REPL) y `-l` sin `-i`, que da el `PATH` de `~/.zprofile` pero no
 `~/.zshrc`, con su prompt y sus alias. Como `abrir_aplicacion`, **nunca devuelve
 éxito sin comprobarlo**: el código de salida va en la respuesta.
+
+### `whatsapp.py`: llegar hasta el borde y parar
+
+`preparar_mensaje_whatsapp` abre el chat de un contacto en ZapZap con el mensaje
+**escrito en el cuadro de texto**. No lo envía, y esa es la decisión de diseño,
+no una limitación: se podría (un Enter sintético con `hl.dsp.send_shortcut` sobre
+la ventana, o el puerto de depuración del WebEngine). Es la única acción de todas
+las de Maripepis que **sale del equipo y le llega a otra persona**, y la única que
+no se deshace. Un fallo del micrófono en `ejecutar_comando` te crea una carpeta
+rara; aquí te manda un mensaje a quien no era. El Enter lo da quien está delante,
+que además es el momento en que mira la pantalla.
+
+Por dentro es la puerta oficial de ZapZap, no automatización de ventanas:
+
+```
+maripepis ──► zapzap "whatsapp://send?phone=…&text=…"
+                 │
+                 └─ SingleApplication: ¿hay instancia? ──► socket ──► la instancia viva
+                                                                        │
+                       MainWindow.xdgOpenChat ──► <a href="…">.click() ─┘
+                                                   dentro de WhatsApp Web
+```
+
+Tres cosas que no son evidentes y que se ven en el código de ZapZap:
+
+- **Con ZapZap cerrado el enlace se pierde.** Su `SingleApplication` solo mira
+  `argv` en la rama de «ya hay otra instancia»; arrancando de cero lo ignora sin
+  decir nada. Por eso `zapzap_abierto()` se conecta a su socket antes —igual que
+  hace ZapZap consigo mismo— y, si no hay nadie, se abre la aplicación y se dice
+  que el mensaje **no** se ha escrito, en vez de darlo por hecho.
+- **La URL acaba dentro de una cadena de JavaScript** (`a.href="<url>"`, en
+  `PageController.xdg_open_chat`). El texto lo escribe un LLM a partir de lo que
+  ha entendido un micrófono, así que va con `quote(safe="")`: una comilla sin
+  codificar no sería una comilla, sería código en la sesión de WhatsApp del
+  usuario.
+- **La agenda tiene que ser nuestra.** La libreta de WhatsApp vive dentro de la
+  sesión del navegador empotrado y desde fuera no se lee. Los nombres salen de
+  `~/.config/maripepis/contactos.toml` —fuera del repositorio: son teléfonos de
+  otra gente— y al modelo se le pasan **los nombres, nunca los números**, porque
+  esa descripción viaja en cada petición y con el backend de Claude eso es la nube.
+
+Ante la duda, pregunta: dos contactos que encajan con «Marta» no se resuelven por
+orden alfabético, se devuelven los dos para que el asistente pregunte. Y la
+comparación es por palabras enteras, para que «Ana» no encaje nunca con «Juana».
+
+**Y una segunda entrada, por la shell.** Los proveedores que traen sus propias
+herramientas (`claude_code_provider.accepts_tools = False`) no reciben ninguna de
+las nuestras, así que WhatsApp les llega como una orden: `maripepis-whatsapp`
+(`tools/whatsapp.py:main`, declarada en `[project.scripts]`), que `cli.py` les mete
+en el *system prompt* si tienen `Bash`. Se les da **la orden, no la receta**: con
+la receta —«ZapZap entiende enlaces `whatsapp://`»— el modelo se monta el enlace a
+mano con un teléfono inventado y se salta la agenda, la desambiguación y el «NO
+está enviado». Llamando a la orden lee exactamente lo mismo que leería como
+herramienta, y el código de salida (1 si no se ha escrito nada) sirve para un
+`Bash` que solo mire eso.
+
+El desmentido tiene aquí una rama propia (`veracidad.desmiente_envio`), y lo que
+mira es **qué herramienta se llamó**: con `preparar_mensaje_whatsapp`, «ya se lo he
+mandado» es mentira y se desmiente en voz alta; con `enviar_mensaje_whatsapp` es
+verdad y hay que callarse. Por eso son dos nombres y no uno con un interruptor:
+esa pregunta no se podría contestar con un solo nombre, y equivocarse duele en las
+dos direcciones — quien oye la mentira se queda esperando una respuesta a un
+mensaje que sigue en el cuadro de texto, y quien oye el desmentido de más manda el
+wasap dos veces. Va fuera de `lo_que_no_ha_hecho` porque no es el mismo caso:
+aquella habla de herramientas que hacían falta y no se llamaron, y aquí la
+herramienta se llamó y salió bien — lo que falla es lo que el modelo cuenta.
+
+Y el desmentido dice además **dónde está el mensaje**, que en cada modo es un sitio
+distinto y le cambia al usuario lo que tiene que hacer: «te lo he dejado escrito en
+el chat, dale a enviar» en borrador, «lo tengo preparado, dime que sí» en envío.
+Eso se sabe sin que la configuración llegue a `veracidad`: mira qué herramientas
+hay puestas (`execute.nombres`), y `enviar_mensaje_whatsapp` solo existe en envío.
+
+#### Y cuando sí envía: `modo = "envio"`
+
+El modo por defecto es el de arriba y lo seguirá siendo. Pero la biblioteca que
+habla el protocolo de WhatsApp (`neonize`, bindings de *whatsmeow*) permite tener
+sesión propia, y con ella el mensaje sale de verdad — y los grupos, que un enlace
+`whatsapp://` nunca pudo abrir porque no tienen teléfono, solo un identificador
+que se ve desde dentro de la sesión.
+
+Eso obliga a un proceso aparte, y no por comodidad: **`connect()` bloquea el hilo
+y no vuelve nunca**, ni cerrando la conexión desde sus propios callbacks. No
+existe el «me conecto, mando y cierro». De ahí `maripepis/whatsapp/`, con el mismo
+reparto que `hotkey/` y por el mismo motivo: algo caro de arrancar que conviene
+tener siempre puesto.
+
+```
+tools/whatsapp.py ──► socket unix ──► whatsapp/daemon.py ──► WhatsApp
+  (agenda, «ante la           │         │
+   duda pregunta»,            │         ├─ hilo principal: accept() y señales
+   tope de texto)             │         └─ hilo aparte:    la sesión, bloqueada
+                              │                            para siempre
+                     $XDG_RUNTIME_DIR/maripepis-whatsapp.sock
+```
+
+Los hilos van así de propósito. Si la sesión se quedara con el principal, Python
+no volvería a mirar una señal, y todo `systemctl stop` acabaría en SIGKILL tras el
+`TimeoutStopSec`. Con el socket en el principal, el `accept()` se interrumpe y el
+cierre es limpio; al final se sale con `os._exit` porque al hilo de la sesión, ya
+dentro de código Go, no hay quien lo despierte.
+
+De la herramienta cambia sorprendentemente poco: **las barandillas son las
+mismas**. La agenda, el «ante la duda pregunta», la comparación por palabras
+enteras y el tope de texto viven en `a_quien_y_que()`, que comparten los dos
+modos; lo único que cambia es el destino final. Equivocarse de persona es el mismo
+error se envíe o se deje escrito.
+
+Lo que sí hay que reponer es el Enter. Sin pantalla que mirar, el freno se muda a
+la conversación y son **dos herramientas y dos turnos**:
+
+```
+turno 1  preparar_mensaje_whatsapp(contacto, texto) ──► $XDG_RUNTIME_DIR/…-pendiente.json
+           └─ «Preparado y SIN ENVIAR: va a Edu y dice …»      {nombre, teléfono,
+              → el modelo se lo lee y pregunta                   texto, turno, creado}
+         ─────────────  el usuario dice que sí  ─────────────
+turno 2  enviar_mensaje_whatsapp()  ──► olvidar el pendiente ──► el demonio ──► WhatsApp
+           (sin argumentos: solo puede soltar lo que ya estaba)
+
+luego    borrar_mensaje_whatsapp()  ──► ¿hay pendiente? ──► se tira, no sale nada
+           («bórralo», sin confirmar)      si no        ──► el demonio: revocar
+```
+
+Tres decisiones sostienen eso, y ninguna es cosmética:
+
+- **La de confirmar no lleva argumentos.** Ni destinatario ni texto: `properties`
+  vacío y `additionalProperties: false`. Es lo que impide que el modelo se invente
+  un envío — solo puede soltar lo que él mismo redactó y el usuario acaba de oír—,
+  y si aun así mete argumentos y no cuadran con lo guardado, se niega en vez de
+  mandar una cosa mientras anuncia otra.
+- **Los dos pasos tienen que venir de turnos distintos.** Un 7B lee «léeselo y
+  espera» y encadena las dos llamadas en la misma vuelta; si eso colara, la
+  confirmación sería un adorno. La marca del turno vive en `utils/turnos.py`, la
+  estrena `Acciones.reset()` —que es donde ya estaba escrito qué es un turno: lo
+  que se olvida— y viaja a la shell de Claude Code en `MARIPEPIS_TURNO`, que
+  hereda todo lo que lance con su `Bash`. Entre dos turnos solo se pasa hablando.
+- **El pendiente es un fichero, no una variable.** Porque los dos caminos que
+  llegan aquí no comparten proceso: las herramientas viven dentro del demonio de
+  maripepis, pero Claude Code ejecuta la orden con su `Bash`, y ahí cada paso es
+  un proceso nuevo. Va en `$XDG_RUNTIME_DIR` (tmpfs, 0700, se lo lleva la sesión),
+  en 0600 desde el `open`, y caduca al minuto: un pendiente viejo es un mensaje
+  que ya no sabes si es el que te leyeron.
+
+Y se olvida **antes** de mandarlo, no después: entre las dos formas de fallar —que
+no salga y haya que dictarlo otra vez, o que salga dos veces— solo una tiene
+arreglo.
+
+Y obliga a distinguir un turno que en realidad ha ido bien: uno que acaba en «le
+mando esto a Edu, ¿te parece?» tiene la forma exacta del turno dejado a medias, de
+la que desconfía todo `veracidad.py`. Dos funciones marcan la diferencia —
+`espera_confirmacion` (hay un mensaje redactado esperando) y
+`confirmacion_prematura` (se intentó confirmar y se dijo que no)—, y con ellas el
+turno no se da por averiado: si no, el usuario oiría su propia pregunta seguida de
+un «en realidad no ha funcionado» que le haría pensar que el wasap se ha perdido.
+
+Al otro lado del envío hay una tercera herramienta, `borrar_mensaje_whatsapp`,
+que es el «no, espera». Tampoco lleva argumentos —siempre es lo último— y hace
+dos cosas que el usuario no tiene por qué distinguir: si hay un pendiente vivo lo
+tira y no llega a salir nada; si no, le pide al demonio el «eliminar para todos»
+(`accion: "revocar"`), que WhatsApp solo permite durante un rato y que cuando
+dice que no, se cuenta tal cual. **Aquí no hay confirmación de dos turnos, y es a
+propósito:** retirar es el lado seguro de los dos, hacerle caso de más cuesta
+volver a dictar un mensaje y hacerle caso de menos deja puesto uno que no querías.
+El único freno que se conserva es el de siempre —sin argumentos, el modelo no
+puede ponerse a retirar mensajes que no ha mandado él—.
+
+Eso obliga a un apunte más en `veracidad.py`: «he borrado» exigía
+`ejecutar_comando`, así que un borrado correcto se desmentía solo con un «no he
+ejecutado ningún comando». Y un turno que retira habla de un mensaje enviado («he
+borrado el mensaje enviado a Edu») sin estar afirmando que acabe de enviarlo, así
+que `desmiente_envio` se calla cuando el borrado salió bien.
+
+##### Grupos
+
+Un grupo no tiene teléfono: tiene un identificador (`120363…@g.us`) que **solo se
+ve desde dentro de la sesión**. De ahí salen las tres decisiones:
+
+- **Se apuntan a mano**, en una sección `[grupos]` del mismo `contactos.toml`, y
+  se validan con `protocol.es_grupo` en vez de con `numero()`.
+- **No se listan solos.** `maripepis-wa grupos <filtro>` los busca desde la
+  terminal para copiar el identificador, y el filtro es obligatorio: esta cuenta
+  está en 269 grupos, y esa lista acabaría en la descripción de la herramienta,
+  o sea viajando al modelo en cada frase. No hay ninguna herramienta que le deje
+  al modelo descubrir grupos: solo escribe a lo que esté apuntado.
+- **Personas y grupos se buscan juntos pero no se mezclan.**
+  `buscar_en_la_libreta` concatena las dos búsquedas en vez de fundir los dos
+  diccionarios, porque fundirlos dejaría uno solo cuando coinciden los nombres —
+  y el que se pierde en silencio es un mensaje que acaba en el sitio equivocado,
+  con la diferencia de que de un grupo lo leen doce. Coincidir es una duda, y una
+  duda se pregunta.
+
+En modo borrador no existen: un enlace `whatsapp://send` lleva un teléfono y no
+hay ninguno que poner, así que ni se le nombran al modelo (`descripcion` los
+omite) y, si aun así lo intenta, se le dice qué es lo que falta y dónde está la
+salida. Y en todo lo que se lee en voz alta, un grupo se nombra como tal —«va
+**al grupo** Familia»—, que sin ver la pantalla es la única forma de notar la
+diferencia.
+
+Tres detalles del demonio que costaron medirlos:
+
+- **La tabla `whatsmeow_device` con cero filas es «no vinculado»**, y se consulta
+  por SQLite sin tocar la red. Sin eso, arrancar sin sesión deja al servicio
+  esperando un QR que nadie va a escanear.
+- **El fichero de sesión lo crea la parte Go en 644**, a mitad de `connect()`,
+  cuando ya no hay dónde meter un `chmod`. Solo llega a tiempo `umask(0o077)`, y
+  ese fichero es el WhatsApp entero del usuario.
+- **`grupos` sin filtro devuelve el recuento y nada más**, por lo que se explica
+  arriba. El filtro no es una comodidad de la orden: es lo que impide que exista
+  la lista entera en algún sitio del que pueda acabar viajando al modelo.
 
 ---
 
@@ -583,15 +781,10 @@ device = "auto"              # auto | cpu | cuda
 compute_type = "int8"        # int8 | float16 | float32
 
 [llm]
-backend = "ollama"           # ollama | claude | claude-code  ← cambia SOLO esta línea
+backend = "claude-code"      # claude-code | claude  ← cambia SOLO esta línea
 stream = true                # imprescindible para hablar mientras se genera
 max_history = 10
 system_prompt = "Eres Maripepis, un asistente de voz breve, cercano y en español."
-
-[llm.ollama]
-host = "http://localhost:11434"
-model = "llama3.1:8b"
-temperature = 0.7
 
 [llm.claude]
 model = "claude-opus-4-8"    # o "claude-haiku-4-5" para menor latencia/coste en respuestas cortas
@@ -647,16 +840,17 @@ sounddevice        # captura y reproducción
 numpy              # buffers de audio
 webrtcvad          # VAD (o silero-vad + torch)
 faster-whisper     # STT
-httpx              # cliente HTTP para Ollama (o el paquete `ollama`)
+httpx              # cliente HTTP (búsquedas, el tiempo)
 anthropic          # cliente oficial de Claude (solo si usas backend = "claude";
                    # backend = "claude-code" no necesita nada: usa el CLI)
 piper-tts          # TTS (o invocar el binario)
 ```
 
 ### Servicios externos
-- **Backend Ollama** (local): `ollama serve` + `ollama pull llama3.1:8b`
-- **Backend Claude** (nube): exporta tu clave → `set -x ANTHROPIC_API_KEY sk-ant-...`
-  (en fish) o `export ANTHROPIC_API_KEY=sk-ant-...` (bash). No hace falta Ollama.
+- **Backend Claude Code** (por defecto): el binario `claude` instalado y con la
+  sesión iniciada (`claude`, y dentro `/login`). Ni clave ni crédito de API.
+- **Backend Claude** (API): exporta tu clave → `set -x ANTHROPIC_API_KEY sk-ant-...`
+  (en fish) o `export ANTHROPIC_API_KEY=sk-ant-...` (bash).
 - Modelo de voz Piper descargado en `models/piper/` (común a ambos backends)
 
 ---
@@ -664,9 +858,9 @@ piper-tts          # TTS (o invocar el binario)
 ## 8. Puesta en marcha
 
 ```bash
-# 1. Instalar Ollama y descargar un modelo
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull llama3.1:8b
+# 1. Tener Claude Code instalado y con sesión (o una ANTHROPIC_API_KEY, si vas
+#    por la API)
+claude          # y dentro: /login
 
 # 2. Crear entorno e instalar dependencias
 python -m venv .venv
@@ -686,8 +880,9 @@ python -m maripepis
 
 **Fase 1 — Esqueleto (MVP en modo texto)** ✅
 - [x] Estructura de paquete y `config.py`.
-- [x] `base.py` + `ollama_provider.py` + `factory.py`: contrato y primer proveedor.
-- [x] Bucle mínimo teclado→LLM→consola. *Valida que Ollama responde.*
+- [x] `base.py` + `factory.py`: el contrato y el primer proveedor (fue
+      `ollama_provider.py`, que ya no está: ver la nota de la cabecera).
+- [x] Bucle mínimo teclado→LLM→consola.
 - [x] `claude_provider.py`: `backend = "claude"` funciona **sin tocar el bucle**.
 - [x] `claude_code_provider.py`: `backend = "claude-code"`, Claude por suscripción.
 
@@ -738,7 +933,7 @@ python -m maripepis
 
 | Decisión | Opciones | Recomendación inicial |
 |----------|----------|-----------------------|
-| ¿Motor LLM? | Ollama (local, privado) vs Claude (nube, potente) | Ollama por defecto; Claude opcional vía `config.toml` |
+| ¿Motor LLM? | Claude Code (suscripción) vs Claude (API, por token) | Claude Code por defecto; la API vía `config.toml` |
 | ¿STT en CPU o GPU? | `int8` CPU vs `float16` CUDA | Empieza en CPU con `small` |
 | ¿Streaming LLM→TTS? | Simple (esperar todo) vs streaming por frases | Fase 1 simple, luego streaming |
 | ¿Wake word? | Siempre escuchando vs "Oye Maripepis" | Siempre escuchando (más simple) |
@@ -814,8 +1009,9 @@ Específicos de la ventana de chat (Fase 7):
   tools = ""` (lo de serie) no hay ninguna, así que no falta nada; si se le
   activan, habría que sacarlas de los `tool_use` del `stream-json`.
 - **Los `delta` solo llegan si el turno va en streaming.** El turno de
-  herramientas de Ollama va con `stream: false`, así que ahí la respuesta llega
-  entera de una vez; la ventana lo aguanta porque el `reply` final siempre manda.
+  herramientas (backend `claude`) no va en streaming, así que ahí la respuesta
+  llega entera de una vez; la ventana lo aguanta porque el `reply` final siempre
+  manda.
 
 - **Rutas relativas y `cwd`**: `load_config` mira primero el directorio actual y
   `[tts].voice` se resuelve contra él. El unit fija `WorkingDirectory` **y** pasa

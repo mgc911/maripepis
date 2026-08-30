@@ -139,5 +139,5 @@ def test_la_herramienta_lleva_su_configuracion(monkeypatch):
 
 def test_esquema_para_los_proveedores():
     tool = build_shell_tool()
-    assert tool.to_ollama()["function"]["parameters"]["required"] == ["comando"]
+    assert tool.to_claude()["input_schema"]["required"] == ["comando"]
     assert "comando" in tool.to_claude()["input_schema"]["properties"]

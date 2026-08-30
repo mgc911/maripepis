@@ -234,6 +234,22 @@ def test_la_clave_de_api_no_viaja_al_cli(monkeypatch, provider):
     assert "ANTHROPIC_AUTH_TOKEN" not in env
 
 
+def test_cada_turno_le_llega_al_cli_con_su_marca(provider):
+    """Y con ella, a todo lo que el CLI lance con su `Bash`.
+
+    Es lo que permite que la orden de WhatsApp sepa si el «mándalo» viene de un
+    usuario que acaba de decir que sí o del modelo encadenando los dos pasos en
+    la misma vuelta: por aquí cada turno trae una marca distinta, y dentro de un
+    turno todas las órdenes traen la misma.
+    """
+    from maripepis.utils.turnos import TURNO_ENV
+
+    primero = provider._env()[TURNO_ENV]
+    segundo = provider._env()[TURNO_ENV]
+
+    assert primero and primero != segundo
+
+
 # ── las herramientas del propio Claude Code ──────────────────────────────
 
 

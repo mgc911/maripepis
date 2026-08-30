@@ -17,6 +17,7 @@ import logging
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
+from ..utils.turnos import nuevo_turno
 from .base import MARCA_MODELO, Tool, es_fallo
 from .carpetas import resolver_ruta
 
@@ -31,6 +32,11 @@ _ARGUMENTO_PRINCIPAL = {
     "abrir_aplicacion": "nombre",
     "abrir_navegador": "url",
 }
+# `preparar_mensaje_whatsapp` no está aquí a propósito. De las demás lo que hay
+# que ver es una cosa —la orden, la ruta—, pero de un mensaje son dos, a quién y
+# qué le pone, y las dos hacen falta para poder decir «esa no era» antes de darle
+# a enviar. Sin entrada aquí sale justo eso, por el caso general de más abajo.
+
 # Lo que no cabe en una línea y no se echa de menos: el texto de un fichero.
 _ARGUMENTOS_LARGOS = ("contenido",)
 _MAX_RESUMEN = 160
@@ -64,10 +70,17 @@ class Acciones:
         return set(self._por_nombre)
 
     def reset(self) -> None:
-        """Turno nuevo: lo del anterior ya no cuenta."""
+        """Turno nuevo: lo del anterior ya no cuenta.
+
+        Y se estrena marca de turno. La usa el WhatsApp del modo envío para saber
+        si el «mándalo» viene de un usuario que acaba de decir que sí o del propio
+        modelo encadenando dos llamadas sin dejar hablar a nadie. Va aquí porque
+        aquí es donde ya estaba escrito qué es un turno: lo que se olvida.
+        """
         self.ultimo_fallo = None
         self.llamadas = 0
         self.registro.clear()
+        nuevo_turno()
 
     def __call__(self, nombre: str, args) -> str:  # noqa: ANN001
         # Se registra la llamada y su resultado: sin esto, cuando el asistente
@@ -135,6 +148,10 @@ def resumen_del_fallo(resultado: str) -> str:
     frase = frase.split(". Ha dicho:")[0]
     frase = frase.removeprefix("NO he ejecutado nada: ").removeprefix("NO he escrito nada: ")
     frase = frase.removeprefix("NO he abierto nada: ").removeprefix("NO ha salido bien: ")
+    # Los dos del WhatsApp que envía. El desmentido los lee en voz alta y ahí lo
+    # que importa es el motivo: el «no he enviado nada» ya lo dice la frase que
+    # los envuelve, y repetido suena a tartamudeo.
+    frase = frase.removeprefix("NO he enviado nada: ").removeprefix("NO he preparado nada: ")
     frase = frase.rstrip(". ")
     return frase[:200]
 

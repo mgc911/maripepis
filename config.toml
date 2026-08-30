@@ -26,10 +26,12 @@ beam_size = 5                  # más alto = un poco más preciso y más lento
 initial_prompt = "Conversación en español con el asistente Maripepis."
 
 [llm]
-backend = "claude-code"        # ollama | claude | claude-code  ← cambia SOLO esta línea
-                               # ollama      = local, offline, gratis
-                               # claude      = API de Anthropic (ANTHROPIC_API_KEY, se paga por token)
+backend = "claude-code"        # claude | claude-code  ← cambia SOLO esta línea
                                # claude-code = tu suscripción de Claude, vía el CLI de Claude Code
+                               # claude      = API de Anthropic (ANTHROPIC_API_KEY, se paga por token)
+                               # Son el mismo Claude por dos caminos que se pagan
+                               # distinto; se puede saltar de uno a otro sin reiniciar
+                               # con `maripepis-hotkey backend claude`.
 stream = true
 max_history = 10
 # Ojo al escribirlo: esto se lee EN VOZ ALTA (Piper). Todo lo que no sea texto
@@ -37,22 +39,6 @@ max_history = 10
 # URL dicha letra a letra arruina la respuesta. Con WebSearch (backend
 # claude-code) pasa siempre si no se le prohíbe aquí.
 system_prompt = "Eres Maripepis, un asistente de voz breve muy majo, cercano y en español. Responde directamente, sin preámbulos, en 1-3 frases. Te van a leer en voz alta: escribe texto llano, sin markdown, sin enlaces y sin listas de fuentes; si citas algo, di el nombre del sitio y ya."
-
-[llm.ollama]
-host = "http://localhost:11434"
-model = "qwen2.5:7b"           # buen tool-calling y español. NO lo cambies a
-                               # llama3.1:8b: medido sobre «modifica el fichero»,
-                               # escribe 13 de 16 veces frente a 0 de 7 —nunca llama
-                               # a escribir_fichero— y encima miente en pasiva
-                               # («el archivo se ha modificado»)
-temperature = 0.7
-context = 8192                 # tokens de contexto (el servidor de Ollama da 4096 a
-                               # secas, y no llegan: solo el system prompt con la
-                               # memoria y las herramientas ya ronda los 2500). Si se
-                               # pasa, se recorta por el principio y el modelo empieza
-                               # a decir los comandos en voz alta en vez de ejecutarlos.
-                               # Sube a 16384 si tienes VRAM de sobra; 0 = lo que diga
-                               # el servidor.
 
 [llm.claude]
 model = "claude-opus-4-8"      # o "claude-haiku-4-5" para menor latencia/coste en respuestas cortas
@@ -96,7 +82,7 @@ voice = "models/piper/es_ES-sharvard-medium.onnx"
 [tools]
 enabled = true                 # el asistente puede abrir apps, buscar en internet,
                                # consultar el tiempo (wttr.in) y ejecutar comandos
-                               # (requiere un LLM con tool-calling: llama3.1, qwen2.5, claude...)
+                               # (solo con backend = "claude": claude-code trae las suyas)
 
 [tools.shell]
 # Tocar tus ficheros: órdenes de zsh («créame una carpeta fotos» y te la crea, no
@@ -112,6 +98,58 @@ timeout_s = 20                 # corta el comando si tarda más (no hay teclado 
                                # lo que pida datos se queda esperando hasta aquí)
 max_output_chars = 2000        # tope de salida que se le pasa al LLM (y que puede acabar
                                # dicha en voz alta)
+
+[tools.whatsapp]
+# «Mándale un wasap a Marta»: abre su chat en ZapZap y deja el mensaje ESCRITO en
+# el cuadro de texto. No lo envía, y no es que no se pueda: es la única acción que
+# le llega a otra persona y la única que no se deshace, así que el Enter lo das tú,
+# viendo a quién va y qué pone. Un fallo del micrófono se queda entonces en un
+# mensaje que no llegas a enviar, no en uno que ya no puedes retirar.
+enabled = true                 # false = el asistente no puede abrirle el chat a nadie
+modo = "envio"                 # "borrador" = lo de arriba: lo deja escrito, el Enter lo das tú.
+                               # "envio"    = lo ENVÍA por la sesión propia de Maripepis,
+                               #              pero antes te lo lee y espera tu «sí»:
+                               #                  — Mándale un wasap a Edu: llego en diez.
+                               #                  — A Edu: «llego en diez». ¿Te lo mando?
+                               #                  — Sí.        (y ahí sale, no antes)
+                               #              El «sí» tiene que ir en otro turno y el mensaje
+                               #              preparado caduca al minuto; la herramienta que
+                               #              confirma no lleva ni destinatario ni texto, así
+                               #              que solo puede mandar lo que acabas de oír.
+                               #              Requiere el servicio maripepis-whatsapp
+                               #              corriendo (ver packaging/) y la extra:
+                               #                  pip install -e '.[whatsapp]'
+                               #                  maripepis-wa vincular
+                               #              Piénsalo dos veces igualmente: aquí ya no hay
+                               #              pantalla que mirar, y si dices que sí sin
+                               #              escuchar, lo único que te queda es el «eliminar
+                               #              para todos» de WhatsApp, que dura un rato.
+agenda = ""                    # vacío = ~/.config/maripepis/contactos.toml. Un TOML a
+                               # mano, una línea por contacto:
+                               #     marta = "+34600112233"
+                               #     "mi hermana" = "+34600112233"
+                               # (varios nombres para el mismo número: vale cualquiera al
+                               #  hablar. Los que llevan espacios, ENTRE COMILLAS: sin
+                               #  ellas el TOML no es válido y la agenda se queda a cero)
+                               #
+                               # Y los grupos, al final del fichero y en su sección:
+                               #     [grupos]
+                               #     familia = "120363021234567890@g.us"
+                               # Un grupo no tiene teléfono, tiene un identificador que
+                               # solo se ve desde dentro de la sesión; te lo dice
+                               #     maripepis-wa grupos familia
+                               # Apunta los tres o cuatro a los que de verdad escribes:
+                               # esta lista de nombres viaja al modelo en cada frase.
+                               # Solo funcionan con modo = "envio" (a un grupo no se le
+                               # puede abrir el chat con un enlace).
+                               #
+                               # Va fuera del proyecto a propósito: son teléfonos, y
+                               # config.toml está en git. Al modelo se le pasan los
+                               # NOMBRES, nunca los números ni los identificadores.
+prefijo = "34"                 # prefijo de país para los números de 9 cifras; los que
+                               # empiezan por + o por 00 se respetan tal cual
+cliente = "zapzap"             # quien abre WhatsApp; tiene que entender un whatsapp://
+                               # en la línea de órdenes
 
 [memory]
 enabled = true                 # datos fijos del usuario y del equipo, siempre presentes

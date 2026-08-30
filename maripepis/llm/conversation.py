@@ -8,8 +8,8 @@ class Conversation:
 
     Mantiene los turnos como ``{"role": "user"|"assistant", "content": str}``
     alternando y empezando por ``user``. Al leer :attr:`messages`, recorta al
-    tamaño configurado y garantiza que el primer mensaje sea de ``user`` (Claude
-    lo exige; a Ollama no le molesta).
+    tamaño configurado y garantiza que el primer mensaje sea de ``user``, que es
+    lo que exige Claude.
     """
 
     def __init__(self, system_prompt: str, max_history: int = 10) -> None:

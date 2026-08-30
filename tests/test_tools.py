@@ -13,7 +13,8 @@ def test_build_default_tools():
     nombres = {t.name for t in tools}
     assert nombres == {
         "abrir_navegador", "buscar_en_internet", "abrir_aplicacion",
-        "consultar_tiempo", "escribir_fichero", "leer_fichero", "ejecutar_comando",
+        "consultar_tiempo", "preparar_mensaje_whatsapp",
+        "escribir_fichero", "leer_fichero", "ejecutar_comando",
     }
     for t in tools:
         assert isinstance(t, Tool)
@@ -28,13 +29,16 @@ def test_la_shell_se_puede_quitar():
     assert "consultar_tiempo" in nombres       # el tiempo no toca nada tuyo
 
 
+def test_whatsapp_tiene_su_propio_interruptor():
+    # Es la única acción que le llega a otra persona: se quita sola, sin
+    # llevarse por delante lo demás.
+    nombres = {t.name for t in build_default_tools({"whatsapp": {"enabled": False}})}
+    assert "preparar_mensaje_whatsapp" not in nombres
+    assert "ejecutar_comando" in nombres
+
+
 def test_conversion_a_formatos():
     t = build_default_tools()[0]
-    o = t.to_ollama()
-    assert o["type"] == "function"
-    assert o["function"]["name"] == "abrir_navegador"
-    assert "parameters" in o["function"]
-
     c = t.to_claude()
     assert c["name"] == "abrir_navegador"
     assert "input_schema" in c
@@ -69,7 +73,7 @@ def test_lo_que_encuentra_vuelve_como_texto(monkeypatch):
 
     lanzados = []
     monkeypatch.setattr(sys_tools, "buscar_texto", lambda c: "El Teide mide 3715 m.")
-    monkeypatch.setattr(sys_tools, "_launch", lambda args: lanzados.append(args))
+    monkeypatch.setattr(sys_tools, "lanzar", lambda args: lanzados.append(args))
 
     msg = buscar_en_internet({"consulta": "altura del Teide"})
     assert "3715" in msg
@@ -81,7 +85,7 @@ def test_si_no_encuentra_nada_lo_dice_y_abre_el_navegador(monkeypatch, sin_resul
 
     lanzados = []
     monkeypatch.setattr(sys_tools.shutil, "which", lambda _: "/usr/bin/xdg-open")
-    monkeypatch.setattr(sys_tools, "_launch", lambda args: lanzados.append(args))
+    monkeypatch.setattr(sys_tools, "lanzar", lambda args: lanzados.append(args))
 
     msg = buscar_en_internet({"consulta": "gatos"})
     assert es_fallo(msg)         # para que el turno no lo dé por bueno
@@ -95,7 +99,7 @@ def test_execute_via_tool_run(monkeypatch, sin_resultados):
 
     lanzados = []
     monkeypatch.setattr(sys_tools.shutil, "which", lambda _: "/usr/bin/xdg-open")
-    monkeypatch.setattr(sys_tools, "_launch", lambda args: lanzados.append(args))
+    monkeypatch.setattr(sys_tools, "lanzar", lambda args: lanzados.append(args))
 
     tools = {t.name: t for t in build_default_tools()}
     msg = tools["buscar_en_internet"].run({"consulta": "gatos"})
@@ -110,7 +114,7 @@ def test_no_dice_que_abre_lo_que_no_existe(monkeypatch):
     lanzados = []
     monkeypatch.setattr(sys_tools.shutil, "which", lambda c: None)
     monkeypatch.setattr(sys_tools, "_desktop_entry", lambda n: None)
-    monkeypatch.setattr(sys_tools, "_launch", lambda args: lanzados.append(args))
+    monkeypatch.setattr(sys_tools, "lanzar", lambda args: lanzados.append(args))
 
     msg = abrir_aplicacion({"nombre": "kitty"})
 
@@ -124,7 +128,7 @@ def test_abre_por_binario(monkeypatch):
 
     lanzados = []
     monkeypatch.setattr(sys_tools.shutil, "which", lambda c: "/usr/bin/" + c)
-    monkeypatch.setattr(sys_tools, "_launch", lambda args, cwd=None: lanzados.append(args))
+    monkeypatch.setattr(sys_tools, "lanzar", lambda args, cwd=None: lanzados.append(args))
 
     assert abrir_aplicacion({"nombre": "firefox"}) == "He abierto firefox."
     assert lanzados == [["/usr/bin/firefox"]]
@@ -137,7 +141,7 @@ def test_abre_en_la_carpeta_pedida(monkeypatch, tmp_path):
 
     lanzados = []
     monkeypatch.setattr(sys_tools.shutil, "which", lambda c: "/usr/bin/" + c)
-    monkeypatch.setattr(sys_tools, "_launch", lambda args, cwd=None: lanzados.append((args, cwd)))
+    monkeypatch.setattr(sys_tools, "lanzar", lambda args, cwd=None: lanzados.append((args, cwd)))
 
     msg = abrir_aplicacion({"nombre": "alacritty", "directorio": str(tmp_path)})
 
@@ -151,7 +155,7 @@ def test_sin_carpeta_abre_en_el_home(monkeypatch, tmp_path):
     lanzados = []
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(sys_tools.shutil, "which", lambda c: "/usr/bin/" + c)
-    monkeypatch.setattr(sys_tools, "_launch", lambda args, cwd=None: lanzados.append((args, cwd)))
+    monkeypatch.setattr(sys_tools, "lanzar", lambda args, cwd=None: lanzados.append((args, cwd)))
 
     abrir_aplicacion({"nombre": "alacritty"})
 
@@ -166,7 +170,7 @@ def test_carpeta_inexistente_abre_igual_en_el_home(monkeypatch, tmp_path):
     lanzados = []
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(sys_tools.shutil, "which", lambda c: "/usr/bin/" + c)
-    monkeypatch.setattr(sys_tools, "_launch", lambda args, cwd=None: lanzados.append((args, cwd)))
+    monkeypatch.setattr(sys_tools, "lanzar", lambda args, cwd=None: lanzados.append((args, cwd)))
 
     msg = abrir_aplicacion({"nombre": "alacritty", "directorio": str(tmp_path / "no-existe")})
 
@@ -182,7 +186,7 @@ def test_terminal_por_su_nombre_generico(monkeypatch):
     monkeypatch.setenv("TERMINAL", "xdg-terminal-exec")
     monkeypatch.setattr(sys_tools.shutil, "which",
                         lambda c: "/usr/bin/" + c if c == "xdg-terminal-exec" else None)
-    monkeypatch.setattr(sys_tools, "_launch", lambda args, cwd=None: lanzados.append(args))
+    monkeypatch.setattr(sys_tools, "lanzar", lambda args, cwd=None: lanzados.append(args))
 
     assert abrir_aplicacion({"nombre": "una terminal"}).startswith("He abierto")
     assert lanzados == [["/usr/bin/xdg-terminal-exec"]]
@@ -195,7 +199,7 @@ def test_alias_cae_al_siguiente_candidato(monkeypatch):
     monkeypatch.delenv("FILEMANAGER", raising=False)
     monkeypatch.setattr(sys_tools.shutil, "which",
                         lambda c: "/usr/bin/" + c if c == "nautilus" else None)
-    monkeypatch.setattr(sys_tools, "_launch", lambda args, cwd=None: lanzados.append(args))
+    monkeypatch.setattr(sys_tools, "lanzar", lambda args, cwd=None: lanzados.append(args))
 
     assert abrir_aplicacion({"nombre": "el gestor de archivos"}).startswith("He abierto")
     assert lanzados == [["/usr/bin/nautilus"]]
@@ -209,7 +213,7 @@ def test_abre_por_desktop_entry(monkeypatch):
     monkeypatch.setattr(sys_tools.shutil, "which",
                         lambda c: "/usr/bin/gtk-launch" if c == "gtk-launch" else None)
     monkeypatch.setattr(sys_tools, "_desktop_entry", lambda n: "org.gnome.Nautilus")
-    monkeypatch.setattr(sys_tools, "_launch", lambda args, cwd=None: lanzados.append(args))
+    monkeypatch.setattr(sys_tools, "lanzar", lambda args, cwd=None: lanzados.append(args))
 
     assert abrir_aplicacion({"nombre": "nautilus"}) == "He abierto nautilus."
     assert lanzados == [["gtk-launch", "org.gnome.Nautilus"]]
@@ -232,28 +236,26 @@ def test_desktop_entry_busca_en_los_directorios_xdg(tmp_path, monkeypatch):
     assert sys_tools._desktop_entry("kitty") is None
 
 
-def test_launch_usa_uwsm_para_salir_del_cgroup(monkeypatch):
+def test_lanzar_usa_uwsm_para_salir_del_cgroup(monkeypatch):
     # Como servicio, lo lanzado hereda el cgroup y moriría al reiniciar Maripepis.
-    import maripepis.tools.system as sys_tools
+    import maripepis.tools.lanzador as mod
 
     llamadas = []
-    monkeypatch.setattr(sys_tools.shutil, "which", lambda c: "/usr/bin/uwsm-app")
-    monkeypatch.setattr(sys_tools.subprocess, "Popen",
-                        lambda args, **k: llamadas.append(args))
+    monkeypatch.setattr(mod.shutil, "which", lambda c: "/usr/bin/uwsm-app")
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda args, **k: llamadas.append(args))
 
-    sys_tools._launch(["/usr/bin/firefox"])
+    mod.lanzar(["/usr/bin/firefox"])
 
     assert llamadas == [["uwsm-app", "--", "/usr/bin/firefox"]]
 
 
-def test_launch_sin_uwsm_lanza_directo(monkeypatch):
-    import maripepis.tools.system as sys_tools
+def test_lanzar_sin_uwsm_lanza_directo(monkeypatch):
+    import maripepis.tools.lanzador as mod
 
     llamadas = []
-    monkeypatch.setattr(sys_tools.shutil, "which", lambda c: None)
-    monkeypatch.setattr(sys_tools.subprocess, "Popen",
-                        lambda args, **k: llamadas.append(args))
+    monkeypatch.setattr(mod.shutil, "which", lambda c: None)
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda args, **k: llamadas.append(args))
 
-    sys_tools._launch(["/usr/bin/firefox"])
+    mod.lanzar(["/usr/bin/firefox"])
 
     assert llamadas == [["/usr/bin/firefox"]]

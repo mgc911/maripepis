@@ -1,0 +1,43 @@
+# Servicio systemd de usuario para la sesión de WhatsApp de Maripepis.
+#
+# Va aparte del servicio principal a propósito. Son dos cosas que fallan por
+# motivos distintos: si WhatsApp pierde la sesión o la biblioteca revienta, no
+# tiene por qué llevarse por delante la tecla de hablar, que es lo que usas todo
+# el día. Y al revés: reiniciar el asistente para cambiar una voz no debería
+# tirar una sesión de WhatsApp que tarda en reengancharse.
+#
+# Instalar:
+#   pip install -e '.[whatsapp]'                  # trae neonize
+#   maripepis-wa vincular                         # QR, con el servicio parado
+#   cp packaging/maripepis-whatsapp.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now maripepis-whatsapp
+#   journalctl --user -u maripepis-whatsapp -f
+#
+# Comprobar que está vivo:  maripepis-wa estado
+#
+# Esto vincula un dispositivo más a tu cuenta de WhatsApp, como el WhatsApp Web
+# que ya tengas abierto. En el móvil aparece como «Firefox (Linux)».
+
+[Unit]
+Description=Maripepis — sesión de WhatsApp
+# Solo necesita red: ni audio, ni Wayland, ni Hyprland. Por eso NO cuelga de
+# graphical-session.target como el servicio principal — que la sesión sobreviva
+# a cerrar sesión es justo lo que se quiere (con `loginctl enable-linger`).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Proyectos/maripepis
+ExecStart=%h/Proyectos/maripepis/.venv/bin/python -m maripepis.whatsapp.daemon --config %h/Proyectos/maripepis/config.toml
+# Reconectar es normal: WhatsApp corta la conexión cada dos por tres. Lo que no
+# es normal es arrancar sin sesión vinculada, y ahí el demonio sale con 1 y
+# systemd reintenta en balde — de ahí el RestartSec largo, para que se note en
+# el log en vez de convertirse en un bucle silencioso.
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

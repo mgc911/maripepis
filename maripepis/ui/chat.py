@@ -14,12 +14,11 @@ Tres cosas que conviene entender antes de tocarla:
   lanzarla por ruta sin depender de PYTHONPATH ni de cómo esté instalado el
   paquete. Lo único que comparte con el demonio es el protocolo: una línea JSON
   por evento (documentado en `hotkey/protocol.py`).
-* **Escucha por un sitio y habla por otro.** La conexión de `subscribe` es de
-  una sola dirección y se queda muda: el demonio no lee de ella, y usa justo eso
-  para enterarse de que la ventana se ha cerrado (lo único que puede llegar por
-  ahí es el EOF). El switch de motor, que sí manda una orden, abre una conexión
-  **aparte y corta** —igual que el cliente de la tecla—, y la cierra. Si el
-  demonio se reinicia, la ventana se reengancha sola.
+* **Escucha y no habla.** La conexión de `subscribe` es de una sola dirección y
+  se queda muda: el demonio no lee de ella, y usa justo eso para enterarse de que
+  la ventana se ha cerrado (lo único que puede llegar por ahí es el EOF). Si el
+  demonio se reinicia, la ventana se reengancha sola. Lo que la ventana sí manda
+  —reiniciar— no pasa por el demonio, va directo a systemd.
 * **El botón de reiniciar no pasa por el demonio.** Va directo a systemd. Tiene
   que ser así: cuando de verdad hace falta reiniciar es cuando el demonio no
   contesta, y pedírselo a él sería justo lo que no funciona.
@@ -97,13 +96,11 @@ REINICIO_TIMEOUT = 20.0
 # el 🔄 sale plano y descolorido (y de otro tamaño).
 ICONO_REINICIAR = "view-refresh-symbolic"
 
-# El switch de la cabecera: apagado = local, encendido = nube. Los nombres son
-# los del protocolo; lo de al lado es lo que se lee, que «ollama» no le dice nada
-# a nadie a las ocho de la mañana.
-BACKEND_LOCAL = "ollama"
-BACKEND_NUBE = "claude"
-ROTULOS = {BACKEND_LOCAL: "🏠 local", BACKEND_NUBE: "☁️ Claude",
-           "claude-code": "☁️ Claude Code"}
+# Qué motor está contestando, en la cabecera. Las claves son las del protocolo y
+# lo de al lado es lo que se lee: el nombre interno no le dice nada a nadie a las
+# ocho de la mañana. Se pinta, no se toca — el motor se elige en `config.toml`, y
+# en caliente con `maripepis-hotkey backend claude`.
+ROTULOS = {"claude-code": "☁️ Claude Code", "claude": "☁️ Claude"}
 
 CSS = """
 .mp-mensajes { padding: 14px; }
@@ -340,8 +337,7 @@ class Ventana(Gtk.ApplicationWindow):
 
         # Reiniciar el demonio de un clic. Es lo que se acaba haciendo a mano en
         # una terminal: cuando se cuelga, y cuando se toca `config.toml` (que solo
-        # se lee al arrancar). A la izquierda, que la derecha ya es del switch.
-        # No se apaga al perder la conexión —a diferencia del switch— porque sin
+        # se lee al arrancar). No se apaga al perder la conexión, porque sin
         # demonio es justo cuando sirve para algo.
         self.reiniciar = boton_reiniciar()
         self.reiniciar.add_css_class("flat")
@@ -351,21 +347,13 @@ class Ventana(Gtk.ApplicationWindow):
         self.reiniciar.connect("clicked", self._al_reiniciar)
         cabecera.pack_start(self.reiniciar)
 
-        # El switch de motor: local ⇄ Claude, de un clic. Empieza apagado y sin
-        # poder tocarse; lo activa el `hello` del demonio, que es quien sabe en
-        # qué motor está de verdad. Así no se puede mandar una orden a ciegas
-        # antes de que haya con quién hablar.
-        self.motor = Gtk.Label(label=ROTULOS[BACKEND_LOCAL])
+        # Qué motor contesta. Empieza en blanco y lo rellena el `hello` del
+        # demonio, que es quien sabe en qué motor está de verdad: enseñar uno
+        # supuesto sería enseñar el equivocado justo cuando alguien lo cambia
+        # desde otro sitio.
+        self.motor = Gtk.Label(label="")
         self.motor.add_css_class("mp-motor")
-        self.switch = Gtk.Switch()
-        self.switch.set_valign(Gtk.Align.CENTER)
-        self.switch.set_tooltip_text("Cambiar entre el modelo local y Claude")
-        self.switch.set_sensitive(False)
-        self._switch_id = self.switch.connect("notify::active", self._al_cambiar_motor)
-        caja_motor = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        caja_motor.append(self.motor)
-        caja_motor.append(self.switch)
-        cabecera.pack_end(caja_motor)
+        cabecera.pack_end(self.motor)
 
         self.set_titlebar(cabecera)
 
@@ -514,65 +502,31 @@ class Ventana(Gtk.ApplicationWindow):
         self._respuesta = None
         self._texto_respuesta = ""
 
-    # ── el switch de motor ───────────────────────────────────────────────
+    # ── qué motor contesta ───────────────────────────────────────────────
 
     def _pintar_motor(self, backend: str, etiqueta: str = "") -> None:
-        """Deja el switch como está el demonio, SIN mandar nada.
+        """Escribe el motor en la cabecera. Solo mira; no cambia nada.
 
-        El `notify::active` salta lo mismo si lo mueve una persona que si lo
-        mueve el código, así que aquí se desconecta la señal mientras se coloca:
-        sin eso, sincronizar la ventana con el demonio mandaría una orden de
-        vuelta, y dos ventanas abiertas se pondrían a rebotarse el motor.
+        Lo dice el demonio y aquí se cree: llega en el `hello` al engancharse, y
+        otra vez en el evento `backend` si alguien lo cambia por el socket
+        (`maripepis-hotkey backend claude`), también desde otra ventana. Un motor
+        que se supone es un motor que puede estar mal, y el que contesta es el
+        que decide qué se paga y qué herramientas hay.
         """
-        self.switch.handler_block(self._switch_id)
-        self.switch.set_active(backend != BACKEND_LOCAL)
-        self.switch.handler_unblock(self._switch_id)
-        self.switch.set_sensitive(True)
+        if not backend:
+            return                      # sin dato, mejor lo de antes que un hueco
         self.motor.set_text(ROTULOS.get(backend, f"· {backend}"))
         if etiqueta:
             self.motor.set_tooltip_text(etiqueta)
-
-    def _al_cambiar_motor(self, *_a) -> None:
-        """Alguien ha tocado el switch: se pide el cambio y se espera respuesta.
-
-        La petición va en un hilo aparte porque escribe en un socket y lee: aquí
-        estamos en el hilo de GTK, y bloquearlo congela la ventana entera —justo
-        mientras el demonio arranca un proveedor, que es cuando más tarda—.
-        """
-        destino = BACKEND_NUBE if self.switch.get_active() else BACKEND_LOCAL
-        self.switch.set_sensitive(False)
-        self.motor.set_text("· cambiando…")
-        threading.Thread(target=self._pedir_motor, args=(destino,), daemon=True).start()
-
-    def _pedir_motor(self, destino: str) -> None:
-        """El viaje al demonio, fuera del hilo de GTK."""
-        resp = mandar(self.socket_path, {"cmd": "backend", "value": destino})
-        GLib.idle_add(self._respuesta_motor, destino, resp)
-
-    def _respuesta_motor(self, destino: str, resp: dict) -> bool:
-        """Lo que conteste el demonio manda: si dijo que no, el switch vuelve.
-
-        Que es lo importante de todo esto. El backend `claude` necesita
-        ANTHROPIC_API_KEY y sin ella no se puede construir; dejar el switch
-        encendido «porque lo has pulsado» sería enseñar un motor que no está en
-        uso, y a la primera pregunta contestaría el de siempre.
-        """
-        if resp.get("ok"):
-            self._pintar_motor(resp.get("backend", destino))
-        else:
-            self._pintar_motor(resp.get("backend", BACKEND_LOCAL))
-            self.suelto(f"⚠️ {resp.get('error') or 'no he podido cambiar de motor'}",
-                        "mp-error")
-        return False
 
     # ── el botón de reiniciar ────────────────────────────────────────────
 
     def _al_reiniciar(self, *_a) -> None:
         """Un clic y el demonio vuelve a arrancar; la ventana se reengancha sola.
 
-        El viaje va en un hilo aparte por lo mismo que el del switch: `systemctl`
-        bloquea hasta que systemd acepta el trabajo, y el hilo de GTK no se puede
-        parar sin congelar la ventana. El botón se apaga mientras tanto, que si no
+        El viaje va en un hilo aparte: `systemctl` bloquea hasta que systemd
+        acepta el trabajo, y el hilo de GTK no se puede parar sin congelar la
+        ventana. El botón se apaga mientras tanto, que si no
         cuatro clics nerviosos son cuatro reinicios encadenados.
         """
         self.reiniciar.set_sensitive(False)
@@ -605,7 +559,6 @@ class Ventana(Gtk.ApplicationWindow):
     def al_enlace(self, vivo: bool) -> bool:
         if not vivo:
             self.estado.set_text(SIN_CONEXION)
-            self.switch.set_sensitive(False)   # sin demonio no hay a quién pedírselo
             self._cerrar_respuesta()
         return False  # GLib.idle_add: no repetir
 
@@ -615,7 +568,7 @@ class Ventana(Gtk.ApplicationWindow):
 
         if tipo == "hello":
             self._estado(ev)
-            self._pintar_motor(str(ev.get("backend") or BACKEND_LOCAL),
+            self._pintar_motor(str(ev.get("backend") or ""),
                                str(ev.get("backend_label") or ""))
             # Solo la primera vez: al reconectar ya está pintada y duplicarla
             # sería contar la conversación dos veces.
@@ -649,8 +602,8 @@ class Ventana(Gtk.ApplicationWindow):
         elif tipo == "reset":
             self.suelto("— conversación nueva —", "mp-separador")
         elif tipo == "backend":
-            # Puede venir de otra ventana o de `maripepis-hotkey backend claude`.
-            self._pintar_motor(str(ev.get("backend") or BACKEND_LOCAL),
+            # Viene de `maripepis-hotkey backend claude`, o de otra ventana.
+            self._pintar_motor(str(ev.get("backend") or ""),
                                str(ev.get("backend_label") or ""))
             if texto:
                 self.suelto(texto, "mp-aviso" if ev.get("ok") else "mp-error")

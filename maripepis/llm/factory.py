@@ -5,22 +5,12 @@ from __future__ import annotations
 from .base import LLMProvider
 from .claude_code_provider import ClaudeCodeProvider
 from .claude_provider import ClaudeProvider
-from .ollama_provider import OllamaProvider
 
 
 def build_provider(cfg: dict) -> LLMProvider:
     """Devuelve el proveedor indicado por ``cfg["llm"]["backend"]``."""
     llm = cfg["llm"]
     backend = llm["backend"]
-
-    if backend == "ollama":
-        o = llm["ollama"]
-        return OllamaProvider(
-            host=o.get("host", "http://localhost:11434"),
-            model=o["model"],
-            temperature=o.get("temperature", 0.7),
-            context=o.get("context", 8192),
-        )
 
     if backend == "claude":
         c = llm["claude"]
@@ -42,6 +32,5 @@ def build_provider(cfg: dict) -> LLMProvider:
         )
 
     raise ValueError(
-        f"backend de LLM desconocido: {backend!r} "
-        "(usa 'ollama', 'claude' o 'claude-code')"
+        f"backend de LLM desconocido: {backend!r} (usa 'claude' o 'claude-code')"
     )

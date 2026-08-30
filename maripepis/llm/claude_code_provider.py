@@ -26,6 +26,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 
+from ..utils.turnos import TURNO_ENV, nuevo_turno
 from .base import LLMProvider
 
 # Sin esta nota el modelo imita el formato del historial y contesta con "Tú:"
@@ -211,6 +212,13 @@ class ClaudeCodeProvider(LLMProvider):
         # token sin que se note. Para eso ya está el backend `claude`.
         env.pop("ANTHROPIC_API_KEY", None)
         env.pop("ANTHROPIC_AUTH_TOKEN", None)
+        # La marca del turno, que hereda todo lo que lance el CLI con su `Bash`.
+        # Es lo que permite que la orden de WhatsApp distinga «el usuario ha
+        # dicho que sí» de «el modelo se ha contestado a sí mismo»: los dos pasos
+        # de un mismo turno traen la misma marca, y con la misma marca no se
+        # manda nada. Aquí y no en `build_args` porque esto se llama una vez por
+        # turno, que es exactamente lo que hay que contar.
+        env[TURNO_ENV] = nuevo_turno()
         return env
 
     def _avisar(self, aviso, *datos) -> None:  # noqa: ANN001

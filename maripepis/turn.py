@@ -20,7 +20,7 @@ from collections.abc import Callable
 from .llm.conversation import Conversation
 from .utils.phrases import normalize
 from .utils.sentences import iter_sentences
-from .veracidad import lo_que_no_ha_hecho
+from .veracidad import confirmacion_prematura, desmiente_envio, lo_que_no_ha_hecho
 
 # Pistas de que la respuesta ya está reconociendo que algo no ha ido bien. Si
 # aparece alguna, el aviso sobra; si no, se añade.
@@ -57,14 +57,18 @@ def stream_reply_text(provider, conversation: Conversation, speech=None,
 def _desmentir_si_hace_falta(reply: str, execute, logger) -> str:  # noqa: ANN001
     """Añade la verdad si el modelo canta victoria sobre algo que no ha pasado.
 
-    Son dos mentiras distintas, y la segunda es peor. Una: la herramienta dijo
-    «NO he ejecutado nada» y el modelo remata el turno con un «ya lo tienes».
-    Otra: el modelo no llama a ninguna herramienta y narra el éxito igual —el
-    fichero se queda como estaba y no hay ni un fallo que enseñar—. Esta segunda
-    es la que se cuela en una conversación larga, cuando el modelo se cree que ya
-    lo hizo porque lo dijo antes.
+    Son tres mentiras distintas. Una: la herramienta dijo «NO he ejecutado nada» y
+    el modelo remata el turno con un «ya lo tienes». Otra: el modelo no llama a
+    ninguna herramienta y narra el éxito igual —el fichero se queda como estaba y
+    no hay ni un fallo que enseñar—; esta es la que se cuela en una conversación
+    larga, cuando el modelo se cree que ya lo hizo porque lo dijo antes.
 
-    Quien escucha no ve la pantalla: sin esto, las dos suenan exactamente igual
+    Y la tercera, que es de otra familia: dar por enviado un mensaje de WhatsApp.
+    Ahí no ha fallado nada —la herramienta hizo exactamente lo suyo—, pero lo que
+    hizo fue dejarlo escrito (o dejarlo preparado), y quien oye «ya se lo he
+    mandado» ni le da a enviar ni dice que sí.
+
+    Quien escucha no ve la pantalla: sin esto, las tres suenan exactamente igual
     que si hubiera funcionado. Y no basta con pedírselo por el system prompt,
     que es lo que ya se le pide y no lo cumple.
     """
@@ -72,9 +76,17 @@ def _desmentir_si_hace_falta(reply: str, execute, logger) -> str:  # noqa: ANN00
         return reply
 
     motivo = getattr(execute, "ultimo_fallo", None)
+    if motivo and confirmacion_prematura(execute):
+        # No es un fallo del turno: es el WhatsApp negándose a mandar un mensaje
+        # que el usuario todavía no ha aprobado. Lo que tiene que oír es la
+        # pregunta que el modelo le acaba de hacer, no un aviso de avería.
+        motivo = None
     if motivo:
         logger.warning("El modelo daba por hecho algo que falló (%s); lo desmiento.", motivo)
         aviso = f"Aviso: en realidad no ha funcionado, {motivo}."
+    elif (sin_enviar := desmiente_envio(reply, execute)):
+        logger.warning("El modelo daba el mensaje por enviado; lo desmiento.")
+        aviso = f"Aviso: en realidad {sin_enviar}."
     elif (sin_hacer := lo_que_no_ha_hecho(reply, execute)):
         logger.warning("El modelo presume de algo que no ha hecho (%r); lo desmiento.",
                        " ".join(reply.split())[:120])

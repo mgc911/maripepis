@@ -36,16 +36,6 @@ class Tool:
     def run(self, args: dict) -> str:
         return self.handler(args)
 
-    def to_ollama(self) -> dict:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
-            },
-        }
-
     def to_claude(self) -> dict:
         return {
             "name": self.name,

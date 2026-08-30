@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "maripepis"
 version = "0.1.0"
-description = "Asistente de voz local para Linux con proveedor de LLM intercambiable (Ollama ↔ Claude)."
+description = "Asistente de voz para Linux, con Claude por API o por suscripción."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -16,10 +16,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Backend Claude (nube). El backend Ollama no necesita nada extra.
+# Backend Claude por API. El backend claude-code habla con el CLI y no necesita nada.
 claude = ["anthropic>=0.40"]
 # Voz de salida (Fase 2). La reproducción usa `aplay` (alsa-utils, del sistema).
 tts = ["piper-tts>=1.2"]
+# Sesión propia de WhatsApp (enviar de verdad, y grupos). neonize son bindings de
+# whatsmeow, así que se trae un binario Go dentro. Sin esto, la herramienta sigue
+# funcionando en modo borrador: abre el chat y deja el mensaje escrito.
+whatsapp = ["neonize>=0.4.3"]
 # Voz de entrada (Fase 3).
 stt = ["faster-whisper>=1.0"]
 # Aceleración por GPU NVIDIA para Whisper (CUDA 12 + cuDNN 9, sin tocar el sistema).
@@ -42,6 +46,12 @@ dev = ["pytest>=8"]
 maripepis = "maripepis.cli:main"
 # Cliente de la tecla de hablar: lo lanza Hyprland en cada pulsación (ver README).
 maripepis-hotkey = "maripepis.hotkey.client:main"
+# WhatsApp por la shell: es como la usan los proveedores que traen sus propias
+# herramientas (claude-code) y no aceptan las nuestras. Ver tools/whatsapp.py.
+maripepis-whatsapp = "maripepis.tools.whatsapp:main"
+# La sesión de WhatsApp: el demonio (lo arranca systemd) y con quién mirarlo.
+maripepis-whatsappd = "maripepis.whatsapp.daemon:main"
+maripepis-wa = "maripepis.whatsapp.cliente:main"
 
 [tool.setuptools.packages.find]
 include = ["maripepis*"]

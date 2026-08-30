@@ -153,5 +153,5 @@ def test_un_dias_que_no_es_un_numero_no_revienta(responder):
 def test_la_herramienta_esta_bien_formada():
     t = build_weather_tool()
     assert t.name == "consultar_tiempo"
-    assert t.to_ollama()["function"]["name"] == "consultar_tiempo"
+    assert t.to_claude()["name"] == "consultar_tiempo"
     assert t.parameters["required"] == []       # sin lugar, wttr.in geolocaliza

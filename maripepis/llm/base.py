@@ -11,7 +11,7 @@ class LLMProvider(ABC):
 
     Formato neutro de `messages`: lista de ``{"role": "user"|"assistant",
     "content": str}``, empezando por ``user`` y alternando. El ``system`` va
-    aparte (es el mínimo común denominador de Ollama y Claude).
+    aparte, que es como lo quiere Claude y como lo aceptaría cualquier otro.
     """
 
     #: ¿Se le pueden pasar las herramientas de maripepis? Los proveedores que

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import subprocess
 import urllib.parse
 from pathlib import Path
 
@@ -13,7 +12,9 @@ from .base import Tool
 from .busqueda import build_weather_tool, buscar_texto
 from .carpetas import resolver
 from .ficheros import build_file_tool, build_read_tool
+from .lanzador import lanzar
 from .shell import build_shell_tool
+from .whatsapp import build_whatsapp_tools
 
 log = logging.getLogger("maripepis.tools")
 
@@ -41,30 +42,6 @@ def _candidatos(nombre: str) -> list[str]:
         return [nombre.strip()]
     nombres = [os.environ.get(a[1:], "") if a.startswith("$") else a for a in alias]
     return [n for n in nombres if n]
-
-
-def _launch(args: list[str], cwd: Path | None = None) -> None:
-    """Lanza un proceso en segundo plano, desligado de maripepis.
-
-    Con `uwsm-app` (Hyprland/uwsm) la aplicación va a su propio *scope* de
-    systemd. Importa cuando Maripepis corre como servicio: `start_new_session`
-    cambia la sesión, pero **no el cgroup**, así que sin esto todo lo que abriera
-    moriría con un `systemctl --user restart maripepis`.
-
-    `cwd` importa más de lo que parece: sin él, una terminal abierta por el
-    demonio hereda su `WorkingDirectory` (el del proyecto) y aparece en un sitio
-    que no tiene nada que ver con lo que has pedido.
-    """
-    if shutil.which("uwsm-app"):
-        args = ["uwsm-app", "--", *args]
-    log.info("Lanzo %s%s", args, f" desde {cwd}" if cwd else "")
-    subprocess.Popen(
-        args,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        cwd=str(cwd) if cwd else None,
-    )
 
 
 def _data_dirs() -> list[Path]:
@@ -98,7 +75,7 @@ def abrir_navegador(args: dict) -> str:
         url = "https://" + url
     if shutil.which("xdg-open") is None:
         return "NO he abierto nada: no encuentro `xdg-open` en este equipo."
-    _launch(["xdg-open", url])
+    lanzar(["xdg-open", url])
     return f"He abierto el navegador en {url}."
 
 
@@ -125,7 +102,7 @@ def buscar_en_internet(args: dict) -> str:
     if shutil.which("xdg-open") is None:
         return "NO he buscado nada: no encuentro `xdg-open` en este equipo."
     url = "https://duckduckgo.com/?q=" + urllib.parse.quote_plus(consulta)
-    _launch(["xdg-open", url])
+    lanzar(["xdg-open", url])
     return (
         f"NO he podido traerme los resultados de «{consulta}»: te he abierto la "
         "búsqueda en el navegador para que la mire el usuario. Díselo así, y NO "
@@ -160,12 +137,12 @@ def abrir_aplicacion(args: dict) -> str:
     for candidato in _candidatos(nombre):
         cmd = shutil.which(candidato)
         if cmd:
-            _launch([cmd], cwd)
+            lanzar([cmd], cwd)
             return f"He abierto {nombre}{donde}.{aviso}"
 
         entrada = _desktop_entry(candidato)
         if entrada and shutil.which("gtk-launch"):
-            _launch(["gtk-launch", entrada], cwd)
+            lanzar(["gtk-launch", entrada], cwd)
             return f"He abierto {nombre}{donde}.{aviso}"
 
     return (
@@ -246,6 +223,16 @@ def build_default_tools(tools_cfg: dict | None = None) -> list[Tool]:
         ),
         build_weather_tool(),
     ]
+
+    # WhatsApp va aparte de todo lo demás: es la única acción que le llega a otra
+    # persona. Ni siquiera esta la envía —deja el mensaje escrito y el enviar lo da
+    # el usuario—, pero abrirle el chat a alguien ya es meterse en su conversación,
+    # así que tiene su propio interruptor.
+    whatsapp_cfg = (tools_cfg or {}).get("whatsapp", {})
+    if whatsapp_cfg.get("enabled", True):
+        # Una en borrador y dos en envío: ahí redactar y enviar son dos pasos, con
+        # el usuario diciendo que sí por en medio.
+        tools.extend(build_whatsapp_tools(whatsapp_cfg))
 
     # Leer y escribir ficheros van con la shell: las tres tocan tus cosas, así que
     # las tres se quitan de en medio con `[tools.shell] enabled = false`.

@@ -273,9 +273,10 @@ def test_cancel_vuelve_a_reposo():
 
 def test_status_y_ping():
     d = build()
-    # Lleva el motor en uso: es lo que deja al switch de la ventana abrir bien puesto.
+    # Lleva el motor en uso: es lo que deja a la ventana abrir con el nombre
+    # correcto en la cabecera en vez de con uno supuesto.
     assert d.handle({"cmd": "status"}) == {"ok": True, "state": IDLE,
-                                           "backend": "ollama"}
+                                           "backend": "claude-code"}
     assert d.handle({"cmd": "ping"})["state"] == IDLE
 
 
@@ -416,7 +417,11 @@ def test_reinicia_el_contexto_tras_la_inactividad(monkeypatch):
     d = build({"context_timeout_s": 300})
 
     turno(d)
-    monkeypatch.setattr(mod.time, "monotonic", lambda: 10_000.0)  # +2 h
+    # «Dos horas después» tiene que serlo del turno anterior, no de un 10.000
+    # absoluto: `time.monotonic()` cuenta desde el arranque de la máquina, así que
+    # ese número dejaba de estar en el futuro en cuanto el equipo llevaba encendido
+    # 2 h 47 min, y el test fallaba solo por eso, sin que nadie hubiera tocado nada.
+    monkeypatch.setattr(mod.time, "monotonic", lambda: d._last_turn + 7_200)  # +2 h
     turno(d)
 
     assert len(d.conversation.messages) == 2  # solo el turno nuevo
@@ -687,8 +692,8 @@ def _con_backend(monkeypatch, provider=None, revienta=None):
 
     monkeypatch.setattr(mod, "build_provider", _fabrica)
     d = build()
-    d.cfg = {"llm": {"backend": "ollama", "ollama": {"model": "qwen2.5:7b"}}}
-    d._backend = "ollama"
+    d.cfg = {"llm": {"backend": "claude-code", "claude_code": {"model": "sonnet"}}}
+    d._backend = "claude-code"
     return d
 
 
@@ -703,8 +708,8 @@ def test_cambia_de_motor_en_caliente(monkeypatch):
 
 
 def test_el_historial_sobrevive_al_cambio(monkeypatch):
-    # Es lo que hace que el switch sirva a mitad de conversación: `Conversation`
-    # es neutra, así que se sigue por donde se iba pero con el otro motor.
+    # Es lo que hace que cambiar sirva a mitad de conversación: `Conversation` es
+    # neutra, así que se sigue por donde se iba pero con el otro motor.
     d = _con_backend(monkeypatch)
     d.conversation.add_user("hola")
     d.conversation.add_assistant("buenas")
@@ -726,7 +731,7 @@ def test_si_el_motor_nuevo_no_se_puede_construir_no_se_cambia(monkeypatch):
     assert resp["ok"] is False
     assert "ANTHROPIC_API_KEY" in resp["error"]
     assert d.provider is antes            # el de siempre sigue en su sitio
-    assert d._backend == "ollama"
+    assert d._backend == "claude-code"
 
 
 def test_un_motor_que_no_existe_se_rechaza(monkeypatch):
@@ -734,7 +739,7 @@ def test_un_motor_que_no_existe_se_rechaza(monkeypatch):
     resp = d.handle({"cmd": "backend", "value": "gemini"})
 
     assert resp["ok"] is False
-    assert d._backend == "ollama"
+    assert d._backend == "claude-code"
 
 
 def test_no_se_cambia_de_motor_a_mitad_de_turno(monkeypatch):
@@ -745,13 +750,13 @@ def test_no_se_cambia_de_motor_a_mitad_de_turno(monkeypatch):
     resp = d.handle({"cmd": "backend", "value": "claude"})
 
     assert resp == {"ok": False, "error": "ocupado", "state": PROCESSING,
-                    "backend": "ollama"}
+                    "backend": "claude-code"}
 
 
 def test_cambiar_al_que_ya_esta_no_hace_nada(monkeypatch):
     d = _con_backend(monkeypatch)
     antes = d.provider
-    assert d.handle({"cmd": "backend", "value": "ollama"})["ok"] is True
+    assert d.handle({"cmd": "backend", "value": "claude-code"})["ok"] is True
     assert d.provider is antes
 
 
@@ -767,11 +772,11 @@ def test_el_cambio_se_les_cuenta_a_las_ventanas(monkeypatch):
 
 
 def test_la_bienvenida_dice_en_que_motor_esta(monkeypatch):
-    # Es lo que deja al switch de la ventana abrir en la posición correcta.
+    # Es lo que deja a la ventana escribir el motor en la cabecera al abrirse.
     d = _con_backend(monkeypatch)
     hola = d._hello()
 
-    assert hola["backend"] == "ollama"
+    assert hola["backend"] == "claude-code"
     assert hola["backend_label"]
 
 
@@ -889,7 +894,7 @@ def test_al_cambiar_de_motor_el_nuevo_tambien_avisa(monkeypatch):
     monkeypatch.setattr(mod, "build_provider", lambda cfg: nuevo)
     d = build()
 
-    assert d.handle({"cmd": "backend", "value": "claude-code"})["ok"] is True
+    assert d.handle({"cmd": "backend", "value": "claude"})["ok"] is True
     assert nuevo.on_tool == d._al_ejecutar_el_proveedor
     assert nuevo.on_file == d._mostrar_documento
 

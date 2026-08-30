@@ -6,13 +6,16 @@ Se puede depurar a mano:
     {"cmd": "status"}
 
 Órdenes: ``start`` (con ``mode``: "assistant" | "dictation"), ``stop``,
-``cancel``, ``status``, ``ping`` y ``backend`` (con ``value``: "ollama" |
-"claude" | "claude-code"). **``stop`` no lleva modo**: el demonio recuerda el
-del ``start``, así soltar ALT+SHIFT+Z en dos tiempos no lía nada.
+``cancel``, ``status``, ``ping`` y ``backend`` (con ``value``: "claude" |
+"claude-code"). **``stop`` no lleva modo**: el demonio recuerda el del ``start``,
+así soltar ALT+SHIFT+Z en dos tiempos no lía nada.
 
-La ventana de chat manda ``backend`` por una conexión **aparte**, corta, como
-haría el cliente de la tecla. No por la de ``subscribe``: esa se queda muda a
-propósito (ver abajo), y leer de ella rompería el modo en que se detecta que una
+``backend`` cambia de motor sin reiniciar ni perder la conversación. Los dos que
+quedan son el mismo Claude por dos caminos que se pagan distinto —la API por
+token y el CLI con la suscripción—, así que sirve para saltar de uno a otro
+cuando se agota alguno. Va por una conexión **aparte**, corta, como cualquier
+orden del cliente de la tecla; no por la de ``subscribe``, que se queda muda a
+propósito (ver abajo) y leer de ella rompería el modo en que se detecta que una
 ventana se ha cerrado.
 
 Hay una orden más, ``subscribe``, que no usa la tecla sino la ventana de chat:
@@ -36,9 +39,9 @@ SOCKET_NAME = "maripepis.sock"
 
 COMMANDS = ("start", "stop", "cancel", "status", "ping", "backend")
 MODES = ("assistant", "dictation")
-#: Los motores entre los que se puede cambiar en caliente. El orden manda: es el
-#: que usa el switch de la ventana para saber cuál es «el otro».
-BACKENDS = ("ollama", "claude", "claude-code")
+#: Los motores entre los que se puede cambiar en caliente. El primero es el que
+#: se da por supuesto cuando no hay otra cosa dicha.
+BACKENDS = ("claude-code", "claude")
 
 # La orden de la ventana de chat. Fuera de COMMANDS a propósito: `parse_argv` es
 # lo que acepta el cliente de la tecla, y suscribirse desde ahí no tiene sentido
@@ -126,5 +129,5 @@ def parse_argv(argv: list[str]) -> dict:
 def usage() -> str:
     return (
         "uso: maripepis-hotkey start [assistant|dictation] | stop | cancel | "
-        "status | ping | backend [ollama|claude|claude-code]"
+        "status | ping | backend [claude-code|claude]"
     )

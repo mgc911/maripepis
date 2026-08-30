@@ -33,7 +33,7 @@ class ProviderRoto:
     label = "Roto"
 
     def stream_reply(self, system_prompt, messages):
-        raise RuntimeError("ollama no responde")
+        raise RuntimeError("el motor no responde")
 
 
 class FakeSpeech:
@@ -306,3 +306,65 @@ def test_desmiente_tambien_la_mentira_en_pasiva():
                        tools=[object()], execute=acciones)
 
     assert "no he llegado a escribir el fichero" in reply
+
+
+# --- El turno que acaba preguntando «¿te lo mando?» -------------------------
+
+class AccionesDeWhatsApp(AccionesQueRecuerdan):
+    """Un turno del modo envío: dos herramientas puestas y un registro de llamadas.
+
+    `registro` es lo que distingue «no se ha intentado confirmar» de «se ha
+    intentado y se ha dicho que no», que es justo lo que hay que saber para no
+    dar por averiado un turno que ha ido como tenía que ir.
+    """
+
+    nombres = {"preparar_mensaje_whatsapp", "enviar_mensaje_whatsapp"}
+
+    def __init__(self, ok=("preparar_mensaje_whatsapp",), registro=(), **kw):
+        super().__init__(ok=ok, **kw)
+        self.registro = [(n, {}, "NO he enviado nada: ...") for n in registro]
+
+
+def test_un_si_que_el_modelo_se_da_a_si_mismo_no_averia_el_turno():
+    """El 7B confirma sin dejar hablar al usuario, la herramienta se niega, y el
+    turno acaba bien: con el mensaje preparado y la pregunta hecha.
+
+    Sin esto, quien escucha oye su pregunta y detrás un «en realidad no ha
+    funcionado» que le hace pensar que el wasap se ha perdido.
+    """
+    provider = FakeProvider(tools_reply="Le mando a Edu «llego en diez». ¿Se lo mando?")
+    acciones = AccionesDeWhatsApp(
+        registro=("preparar_mensaje_whatsapp", "enviar_mensaje_whatsapp"),
+        ultimo_fallo="acabo de prepararlo en este mismo turno", llamadas=2)
+
+    reply = reply_turn(provider, _conv(), "mándale un wasap a Edu", LOG,
+                       tools=[object()], execute=acciones)
+
+    assert reply == "Le mando a Edu «llego en diez». ¿Se lo mando?"
+
+
+def test_pero_si_encima_lo_da_por_enviado_se_le_desmiente():
+    """Callarse el aviso de avería no es callarse la mentira."""
+    provider = FakeProvider(tools_reply="Ya se lo he enviado a Edu.")
+    acciones = AccionesDeWhatsApp(
+        registro=("preparar_mensaje_whatsapp", "enviar_mensaje_whatsapp"),
+        ultimo_fallo="acabo de prepararlo en este mismo turno", llamadas=2)
+
+    reply = reply_turn(provider, _conv(), "mándale un wasap a Edu", LOG,
+                       tools=[object()], execute=acciones)
+
+    assert "no lo he enviado todavía" in reply
+    assert "dime que sí" in reply
+
+
+def test_un_fallo_de_verdad_en_ese_turno_se_sigue_diciendo():
+    """La excepción es solo para la confirmación que se niega a sí misma."""
+    provider = FakeProvider(tools_reply="Le he mandado el wasap y te he abierto la agenda.")
+    acciones = AccionesDeWhatsApp(registro=("preparar_mensaje_whatsapp",),
+                                  ultimo_fallo="«agenda» no está instalada", llamadas=2)
+
+    reply = reply_turn(provider, _conv(), "mándale un wasap y abre la agenda", LOG,
+                       tools=[object()], execute=acciones)
+
+    assert "no ha funcionado" in reply.lower()
+    assert "agenda" in reply

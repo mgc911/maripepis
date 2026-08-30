@@ -13,13 +13,16 @@ push-to-talk (Enter) → texto.
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
+from pathlib import Path
 
 from .config import load_config
 from .llm.conversation import Conversation
 from .llm.factory import build_provider
 from .memory import load_memory
 from .tools import es_fallo, resumen_de_la_llamada
+from .tools.whatsapp import modo_de as modo_de_whatsapp
 from .turn import reply_turn
 from .utils.logging import get_logger
 from .utils.phrases import is_exit, normalize, strip_wake_word
@@ -35,7 +38,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config", help="Ruta a config.toml", default=None)
     p.add_argument(
         "--backend",
-        choices=["ollama", "claude", "claude-code"],
+        choices=["claude", "claude-code"],
         default=None,
         help="Fuerza el motor LLM (sobrescribe config.toml)",
     )
@@ -340,6 +343,64 @@ def _run_daemon(cfg, provider, conversation, logger, *, stt, speech, tools, exec
             speech.close()
 
 
+def orden_de_whatsapp() -> str:
+    """La orden con la que se manda un wasap desde una shell, o ``""``.
+
+    Se busca al lado del intérprete que está corriendo (el `bin/` del venv), que
+    es donde la deja `pip install -e .`, antes que en el `PATH`: como servicio,
+    el `PATH` es el de systemd y el venv no está en él.
+    """
+    junto_al_python = Path(sys.executable).parent / "maripepis-whatsapp"
+    if junto_al_python.exists():
+        return str(junto_al_python)
+    return shutil.which("maripepis-whatsapp") or ""
+
+
+def puede_ejecutar_ordenes(cfg: dict) -> bool:
+    """¿El proveedor con herramientas propias tiene alguna para ejecutar cosas?"""
+    suyas = str(cfg.get("llm", {}).get("claude_code", {}).get("tools", "")).lower()
+    return suyas.strip() == "default" or "bash" in suyas
+
+
+def instrucciones_de_whatsapp_por_shell(orden: str, modo: str = "borrador") -> str:
+    """Lo que se le cuenta a un proveedor que no acepta nuestras herramientas.
+
+    Claude Code trae las suyas y las de maripepis no le llegan
+    (`claude_code_provider.accepts_tools = False`), así que de WhatsApp solo se
+    entera por aquí. Se le da **la orden hecha**, no la explicación: contarle que
+    ZapZap entiende enlaces `whatsapp://` acaba en un enlace montado a mano con
+    un teléfono inventado, sin agenda, sin el «ante la duda pregunta» y sin el
+    «NO está enviado». Llamando a la orden, todo eso sigue puesto, y lo que lee
+    es exactamente lo que leería si fuera una herramienta suya.
+    """
+    return (
+        " Para mandarle un wasap o un mensaje de WhatsApp a alguien, ejecuta con Bash"
+        f" esta orden: {orden} 'CONTACTO' 'TEXTO' — el contacto tal y como lo haya"
+        " nombrado el usuario («Edu», «mi hermana») y el mensaje con sus palabras."
+        " NO montes tú un enlace whatsapp:// ni abras ZapZap por tu cuenta: esa orden"
+        " es la que conoce la agenda y sus teléfonos, y tú no. Cuéntale al usuario lo"
+        " que te conteste, tal cual, también si dice que no ha podido."
+    ) + (
+        # La última frase es la que más importa, y es la que cambia con el modo:
+        # decirle que no envía cuando envía sería mentirle al usuario por boca del
+        # modelo, y al revés lo dejaría esperando un mensaje que nunca salió.
+        (" Y lo más importante: eso NO envía nada todavía, lo deja preparado. Va en DOS"
+         f" pasos. Lo que te conteste ({orden} con el contacto y el texto) se lo lees al"
+         " usuario —a quién va y qué pone, y si es un grupo, que es un grupo— y le"
+         f" preguntas si lo mandas; ahí termina tu turno. Solo cuando te conteste que"
+         f" sí, ejecutas {orden} --enviar, sin nada más: eso lo envía de verdad y al"
+         " momento. Si te dice que no, o te cambia el mensaje, vuelve a prepararlo con"
+         " lo nuevo en vez de enviarlo. Y nunca ejecutes los dos pasos seguidos: si el"
+         " usuario no ha contestado, no hay nada que confirmar."
+         f" Si después se arrepiente, ejecuta {orden} --borrar: retira lo último, esté"
+         " preparado o ya enviado, y ahí no hay que preguntarle nada.")
+        if modo == "envio" else
+        (" Y lo más importante: NO envía el mensaje, lo deja escrito en el chat para que"
+         " le dé a enviar el usuario. Nunca digas que lo has enviado, que ya está"
+         " mandado ni que le ha llegado.")
+    )
+
+
 def instrucciones_de_herramientas(nombres: set[str]) -> str:
     """Lo que se le añade al system prompt cuando hay acciones disponibles.
 
@@ -372,6 +433,40 @@ def instrucciones_de_herramientas(nombres: set[str]) -> str:
             " los datos de verdad. Si te piden apuntar una previsión en un fichero,"
             " consúltala PRIMERO y escribe después: un documento con los días puestos"
             " y vacíos no vale de nada."
+        )
+    if {"preparar_mensaje_whatsapp", "enviar_mensaje_whatsapp"} <= nombres:
+        # Las dos juntas son el modo envío, y lo que hay que contarle no es qué
+        # hace cada una, sino que hay un usuario hablando en medio.
+        instrucciones += (
+            " Para mandarle un wasap a alguien tienes DOS herramientas y son DOS"
+            " pasos. Primero preparar_mensaje_whatsapp, con el contacto y el texto:"
+            " eso NO envía nada, lo deja preparado. Léele entonces al usuario a quién"
+            " va y qué pone, con esas mismas palabras, pregúntale si lo mandas y"
+            " termina el turno ahí. Solo cuando te conteste que sí llamas a"
+            " enviar_mensaje_whatsapp, que no lleva argumentos y manda lo que"
+            " preparaste. Nunca las llames las dos seguidas — si el usuario no ha"
+            " contestado, no hay nada que confirmar—, y si te cambia el mensaje o el"
+            " destinatario, prepáralo otra vez con lo nuevo. Mientras solo esté"
+            " preparado, no digas que está enviado."
+            " Algunos destinos de su agenda son GRUPOS, con varias personas dentro:"
+            " cuando le leas a quién va, dile que es un grupo, que no es lo mismo que"
+            " se lo lea una persona."
+        )
+        if "borrar_mensaje_whatsapp" in nombres:
+            instrucciones += (
+                " Y si después se arrepiente —«bórralo», «quítalo», «no lo mandes»,"
+                " «me he equivocado»— llama a borrar_mensaje_whatsapp, sin argumentos"
+                " y sin preguntarle nada: retira lo último, esté preparado o ya"
+                " enviado. Ahí no hay que confirmar, y date prisa: WhatsApp solo deja"
+                " retirar un mensaje durante un rato."
+            )
+    elif "preparar_mensaje_whatsapp" in nombres:
+        instrucciones += (
+            " Para mandarle un wasap a alguien tienes preparar_mensaje_whatsapp, que"
+            " abre su chat y deja el mensaje ESCRITO. No lo envía, y eso hay que"
+            " decirlo siempre: el usuario tiene que darle a enviar él, viendo a quién"
+            " va y qué pone. Nunca digas que lo has enviado, que ya está mandado ni"
+            " que le ha llegado, ni siquiera si la herramienta ha ido bien."
         )
     # Lo importante: que actúe. Sin esta orden, ante «créame una carpeta» el
     # modelo contesta con un `mkdir` para que lo escriba el usuario, que es
@@ -447,6 +542,22 @@ def main(argv: list[str] | None = None) -> int:
             "%s trae sus propias herramientas: las de maripepis quedan fuera "
             "(configúralas en [llm.claude_code] tools).", provider.label,
         )
+        # De WhatsApp sí se le habla, porque es la única que no se puede sustituir
+        # improvisando: sin la agenda no hay teléfono al que escribir. Se le pasa
+        # la orden para que la ejecute con SU shell, no la receta para que la
+        # invente. Sin shell no hay nada que contarle.
+        whatsapp_cfg = cfg.get("tools", {}).get("whatsapp", {})
+        orden = orden_de_whatsapp() if whatsapp_cfg.get("enabled", True) else ""
+        if orden and puede_ejecutar_ordenes(cfg):
+            modo = modo_de_whatsapp(whatsapp_cfg)
+            logger.info("WhatsApp va por la shell de %s (modo %s): %s",
+                        provider.label, modo, orden)
+            cfg["llm"]["system_prompt"] += instrucciones_de_whatsapp_por_shell(orden, modo)
+        elif orden:
+            logger.info(
+                "WhatsApp queda fuera: %s no tiene con qué ejecutar órdenes "
+                "(añade Bash a [llm.claude_code] tools).", provider.label,
+            )
     elif acciones_on:
         from .tools.runner import Acciones
         from .tools.system import build_default_tools

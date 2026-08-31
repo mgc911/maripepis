@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from maripepis.whatsapp import cliente, protocol
+from maripepis.whatsapp import cliente, daemon, protocol
 from maripepis.whatsapp.daemon import Demonio, vinculado
 
 
@@ -257,3 +257,137 @@ def test_ida_y_vuelta_por_el_socket(demonio):
 def test_sin_demonio_se_nota(tmp_path):
     """«No hay demonio» y «el demonio dice que no» no son lo mismo."""
     assert cliente.pedir({"accion": "ping"}, path=str(tmp_path / "no-hay.sock")) is None
+
+
+# --- La sesión, cuando el arranque se tuerce -------------------------------
+#
+# El caso real: systemd levanta este servicio antes de que haya DNS, `connect()`
+# se estrella con un «lookup web.whatsapp.com» y el hilo de la sesión se acababa
+# ahí. El demonio seguía vivo —atendiendo el socket, contestando que la sesión no
+# está lista— y `Restart=on-failure` no lo veía nunca, porque el proceso no se
+# muere. Estuvo tres horas y media así hasta que un wasap se quedó sin salir.
+
+def sesion_de_pega(monkeypatch, guion):
+    """`neonize.client` fingido: `connect()` hace lo que diga `guion`.
+
+    Cada elemento es o un texto —y entonces `connect()` lanza con ese motivo— o
+    ``None``, que es «conecta»: llama al handler de `ConnectedEv` como haría la
+    biblioteca y vuelve, que es lo que pasa cuando la sesión se corta.
+    """
+    creados = []
+
+    class NewClientFalso:
+        def __init__(self, nombre):                # noqa: ANN001
+            self.nombre = nombre
+            self.handler = None
+            creados.append(self)
+
+        def event(self, _ev):                      # noqa: ANN001
+            def registra(fn):
+                self.handler = fn
+                return fn
+            return registra
+
+        def connect(self):
+            paso = guion.pop(0)
+            if paso is not None:
+                raise RuntimeError(paso)
+            self.handler(ClienteFalso(), None)
+
+    mod_cliente = types.ModuleType("neonize.client")
+    mod_cliente.NewClient = NewClientFalso
+    mod_eventos = types.ModuleType("neonize.events")
+    mod_eventos.ConnectedEv = object()
+    monkeypatch.setitem(sys.modules, "neonize.client", mod_cliente)
+    monkeypatch.setitem(sys.modules, "neonize.events", mod_eventos)
+    return creados
+
+
+@pytest.fixture
+def esperas(monkeypatch):
+    """Las siestas del hilo, apuntadas en vez de dormidas."""
+    dormido = []
+    monkeypatch.setattr(daemon.time, "sleep", dormido.append)
+    return dormido
+
+
+class Guion(list):
+    """Lo que hará cada `connect()`, y un aviso cuando se gasta uno.
+
+    Es una lista para que `sesion_de_pega` la use igual, y algo más para poder
+    pararle el demonio al hilo desde fuera: sin eso el bucle no termina nunca,
+    que es justo lo que se le pide en producción.
+    """
+
+    def __init__(self, pasos) -> None:
+        super().__init__(pasos)
+        self.gastados: list = []
+        self.al_gastar = lambda: None
+
+    def pop(self, i=0):
+        paso = super().pop(i)
+        self.gastados.append(paso)
+        self.al_gastar()
+        return paso
+
+
+def arranca(tmp_path, guion, para_tras):
+    """Un demonio en marcha que se para solo tras `para_tras` intentos."""
+    d = Demonio({"sesion": str(tmp_path / "s.sqlite3"), "socket": str(tmp_path / "s.sock")})
+    d._running = True
+
+    def basta():
+        if len(guion.gastados) >= para_tras:
+            d._running = False
+
+    guion.al_gastar = basta
+    return d, guion.gastados
+
+
+def test_un_arranque_sin_red_no_deja_al_demonio_sin_sesion(tmp_path, monkeypatch, esperas):
+    """Falla dos veces por DNS y a la tercera entra: el hilo tiene que seguir ahí."""
+    guion = Guion(["lookup web.whatsapp.com: Temporary failure in name resolution",
+                   "lookup web.whatsapp.com: Temporary failure in name resolution",
+                   None])
+    sesion_de_pega(monkeypatch, guion)
+    d, intentos = arranca(tmp_path, guion, para_tras=3)
+
+    d._hilo_sesion()
+
+    assert len(intentos) == 3                      # no se rindió en el primer fallo
+    assert esperas == [5.0, 10.0]                  # y esperó más cada vez
+
+
+def test_la_espera_entre_intentos_tiene_techo(tmp_path, monkeypatch, esperas):
+    """WhatsApp caído de verdad no se arregla llamando cada cinco segundos."""
+    guion = Guion(["no hay red"] * 12)
+    sesion_de_pega(monkeypatch, guion)
+    d, _ = arranca(tmp_path, guion, para_tras=12)
+
+    d._hilo_sesion()
+
+    assert esperas == sorted(esperas)              # siempre hacia arriba
+    assert max(esperas) == daemon.MAX_ESPERA_REINTENTO
+
+
+def test_una_sesion_que_aguantó_devuelve_la_espera_a_cero(tmp_path, monkeypatch, esperas):
+    """Una caída tras horas conectado no es el caso del que crece la espera."""
+    guion = Guion(["no hay red", "no hay red", None, "se cortó"])
+    sesion_de_pega(monkeypatch, guion)
+    d, _ = arranca(tmp_path, guion, para_tras=4)
+
+    d._hilo_sesion()
+
+    # La tercera siesta es de 5 y no de 20: entre medias hubo sesión.
+    assert esperas == [5.0, 10.0, 5.0]
+
+
+def test_al_parar_el_demonio_el_hilo_no_reintenta(tmp_path, monkeypatch, esperas):
+    """Un `systemctl stop` no puede quedarse esperando a la siguiente vuelta."""
+    guion = Guion(["no hay red"])
+    sesion_de_pega(monkeypatch, guion)
+    d, _ = arranca(tmp_path, guion, para_tras=1)
+
+    d._hilo_sesion()
+
+    assert esperas == []                           # ni siestas ni cliente nuevo

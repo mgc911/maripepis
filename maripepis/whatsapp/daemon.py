@@ -55,6 +55,13 @@ log = logging.getLogger("maripepis.whatsapp")
 #: es mejor decirlo que dejar al usuario mirando al vacío.
 ESPERA_SESION = 10.0
 
+#: Lo que se espera antes de volver a intentar la sesión, y hasta dónde crece.
+#: Empieza corto porque el fallo típico —arrancar antes de que haya DNS— se
+#: arregla solo en segundos, y crece porque si WhatsApp está caído de verdad no
+#: se gana nada llamando cada cinco segundos toda la tarde.
+ESPERA_REINTENTO = 5.0
+MAX_ESPERA_REINTENTO = 300.0
+
 #: Freno de mano: mensajes por minuto. Nadie dicta seis wasaps en un minuto; un
 #: bucle, sí.
 MAX_POR_MINUTO = 6
@@ -115,29 +122,62 @@ class Demonio:
     # ── la sesión ────────────────────────────────────────────────────────
 
     def _hilo_sesion(self) -> None:
-        """Abre la sesión y se queda ahí dentro para siempre. Literalmente."""
+        """Abre la sesión y se queda ahí dentro para siempre. Literalmente.
+
+        Con un matiz que costó una mañana: `connect()` no vuelve mientras haya
+        sesión, pero **sí vuelve —lanzando— si no ha llegado a haberla**, y eso
+        pasa en todos los arranques en los que el servicio se levanta antes que
+        la red: un `lookup web.whatsapp.com: Temporary failure in name
+        resolution` y a la calle. Por eso se reintenta aquí dentro.
+
+        No vale dejar que se caiga el proceso y que systemd lo levante: el que
+        se muere es este hilo, no el demonio, así que `Restart=on-failure` nunca
+        llega a verlo. El proceso se queda vivo, atendiendo el socket y
+        contestando a cada wasap que la sesión no está lista, hasta que alguien
+        se da cuenta a mano. Que es exactamente lo que pasó.
+        """
         from neonize.client import NewClient       # noqa: PLC0415 - opcional
         from neonize.events import ConnectedEv     # noqa: PLC0415
 
-        cliente = NewClient(str(self.sesion))
+        espera = ESPERA_REINTENTO
+        while self._running:
+            # Cliente nuevo en cada vuelta: el anterior viene de un fallo y no hay
+            # forma de saber cómo quedó por dentro (la mitad de él es Go). El uuid
+            # sale del nombre —la ruta de la sesión—, así que el de ahora ocupa el
+            # sitio del de antes en vez de sumarse.
+            cliente = NewClient(str(self.sesion))
 
-        @cliente.event(ConnectedEv)
-        def _(cli, _ev) -> None:                   # noqa: ANN001
-            self._cli = cli
-            self._listo.set()
-            preparar_casa(self.sesion)             # la base ya existe: 600
+            @cliente.event(ConnectedEv)
+            def _(cli, _ev) -> None:               # noqa: ANN001
+                self._cli = cli
+                self._listo.set()
+                preparar_casa(self.sesion)         # la base ya existe: 600
+                try:
+                    yo = cli.get_me()
+                    log.info("WhatsApp conectado como %s (+%s).", yo.PushName, yo.JID.User)
+                except Exception:                  # noqa: BLE001
+                    log.info("WhatsApp conectado.")
+
             try:
-                yo = cli.get_me()
-                log.info("WhatsApp conectado como %s (+%s).", yo.PushName, yo.JID.User)
-            except Exception:                      # noqa: BLE001
-                log.info("WhatsApp conectado.")
+                cliente.connect()                  # no vuelve mientras haya sesión
+                motivo = "se ha cerrado"
+            except Exception as e:                 # noqa: BLE001
+                motivo = str(e)
 
-        try:
-            cliente.connect()                      # no vuelve
-        except Exception as e:                     # noqa: BLE001
-            log.error("La sesión de WhatsApp se ha caído: %s", e)
+            # Si llegó a conectar, el reloj vuelve a cero: una sesión que aguantó
+            # seis horas y se cortó no es el caso del que crece la espera.
+            hubo_sesion = self._listo.is_set()
             self._listo.clear()
             self._cli = None
+            if not self._running:
+                break
+
+            log.error("La sesión de WhatsApp se ha caído: %s", motivo)
+            if hubo_sesion:
+                espera = ESPERA_REINTENTO
+            log.info("Vuelvo a intentarlo en %.0f s.", espera)
+            time.sleep(espera)
+            espera = min(espera * 2, MAX_ESPERA_REINTENTO)
 
     def _sesion_lista(self) -> bool:
         return self._listo.wait(ESPERA_SESION) and self._cli is not None

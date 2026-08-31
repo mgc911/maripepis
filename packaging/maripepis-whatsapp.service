@@ -24,8 +24,13 @@ Description=Maripepis — sesión de WhatsApp
 # Solo necesita red: ni audio, ni Wayland, ni Hyprland. Por eso NO cuelga de
 # graphical-session.target como el servicio principal — que la sesión sobreviva
 # a cerrar sesión es justo lo que se quiere (con `loginctl enable-linger`).
-After=network-online.target
-Wants=network-online.target
+#
+# Aquí NO va un `After=network-online.target`, y no es un olvido: este es un
+# servicio de USUARIO, y ese target vive en el gestor del sistema. Puesto aquí
+# se queda en `not-found` y no espera a nada, que es peor que no ponerlo —
+# parece que el arranque está resuelto cuando no lo está. La espera de verdad
+# la hace el demonio, que reintenta la sesión hasta que hay red (ver
+# ESPERA_REINTENTO en whatsapp/daemon.py).
 
 [Service]
 Type=simple

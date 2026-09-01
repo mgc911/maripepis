@@ -31,6 +31,10 @@ contactos.toml
 # Ajustes locales de Claude Code (los compartidos irían en .claude/settings.json)
 .claude/settings.local.json
 
+# Lo que suelta un proceso lanzado con nohup (p.ej. el CLI de Claude Code al
+# reventar): traza de un rato concreto, no del proyecto
+nohup.out
+
 # Copias de seguridad automáticas
 *.bak
 *.bak.*

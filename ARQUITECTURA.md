@@ -105,6 +105,11 @@ maripepis/
 │   │   ├── daemon.py          # Demonio: sostiene la sesión (neonize/whatsmeow)
 │   │   └── cliente.py         # pedir(): tres líneas y biblioteca estándar
 │   │
+│   ├── hogar/                 # La casa: luces (Philips Hue por su API local)
+│   │   ├── __init__.py
+│   │   ├── hue.py             # Descubrir el puente, vincularse y hablarle
+│   │   └── cliente.py         # maripepis-hue: vincular (con el botón) y listar
+│   │
 │   ├── ui/                    # Ventana de chat (proceso aparte, GTK4)
 │   │   ├── __init__.py
 │   │   └── chat.py            # Visor: se suscribe al socket y pinta el turno
@@ -378,6 +383,8 @@ maripepis/tools/
 ├── whatsapp.py  # borrador: deja el mensaje escrito; envío: lo prepara, lo manda
 │                # cuando el usuario dice que sí, y lo retira si se arrepiente
 │                # (tres herramientas; personas y grupos)
+├── hogar.py     # controlar_luces, estado_de_las_luces: traduce «apaga el salón»
+│                # a lo que entiende el puente (ver maripepis/hogar/)
 ├── lanzador.py  # lanzar(): proceso desligado, en su propio scope de systemd
 └── runner.py    # Acciones: ejecuta por nombre, registra y recuerda si algo falló
 ```
@@ -679,6 +686,46 @@ Tres detalles del demonio que costaron medirlos:
   la lista entera en algún sitio del que pueda acabar viajando al modelo.
 
 ---
+
+### `hogar.py`: hablarle a la bombilla, no a la nube
+
+La petición fue *"conéctate a mi cuenta de Google y controla el Google Home"*.
+No se puede, y merece quedar escrito para que no se vuelva a intentar:
+
+| Vía de Google | Estado |
+|---|---|
+| SDK de Google Assistant | Cerrada en 2023. Era lo único que dejaba mandar «apaga la luz» por código |
+| Smart Device Management | Viva, pero solo llega a los Nest de la propia Google, y con registro de pago |
+| Home APIs (2024-25) | SDKs de Android y de iOS, con verificación de marca |
+| Home Graph API | Para fabricantes de dispositivos |
+
+Ninguna sirve para un proceso Python en Linux. La alternativa no es un apaño: es
+mejor que lo que se pedía. La API local del puente Hue no sale a internet, no
+tiene token que caduque y responde en milisegundos — y eso último no es un
+detalle de rendimiento, es la diferencia entre que la luz se apague mientras
+acabas la frase o tres segundos después, con alguien mirando la lámpara.
+
+El reparto es el mismo que en WhatsApp, y por el mismo motivo: `hogar/hue.py`
+sabe de recursos, uuids y coordenadas CIE; `tools/hogar.py` solo traduce lo que
+se dice hablando. Entre los dos hay una frontera limpia, que es la que permitirá
+meter altavoces Cast o enchufes al lado de `hue.py` sin tocar la traducción.
+
+Tres decisiones que no se ven en el código y sí en el uso:
+
+- **Los grupos ganan a las bombillas.** Con una habitación «Salón» y una bombilla
+  «Salón», *"apaga el salón"* apaga la habitación. Acertar en lo que la persona
+  está mirando importa más que ser coherente con el orden de búsqueda.
+- **Pedir brillo enciende.** Atenuar una luz apagada no se ve. Y *"ponlo a cero"*
+  apaga de verdad, aunque en el puente brillo 0 sea «al mínimo, pero dada».
+- **Dos caminos, un solo texto.** Con `claude-code` las herramientas no llegan al
+  modelo, así que las luces van por `maripepis-hue luz ...` con su Bash. Esa orden
+  no reimplementa nada: llama a `controlar_luces` y escribe su resultado tal cual,
+  de modo que el modelo lee lo mismo por los dos caminos —incluida la lista de
+  sitios cuando se inventa uno— y solo hay un sitio donde equivocarse.
+- **Aquí no se confirma nada**, al revés que WhatsApp. Encender una luz se
+  deshace apagándola, se ve desde donde estás y no le llega a nadie más. La
+  confirmación hablada es cara —cuesta un turno entero— y hay que gastarla solo
+  donde no hay vuelta atrás.
 
 ## ⌨️ Tecla de hablar (push-to-talk global)
 

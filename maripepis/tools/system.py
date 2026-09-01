@@ -12,6 +12,7 @@ from .base import Tool
 from .busqueda import build_weather_tool, buscar_texto
 from .carpetas import resolver
 from .ficheros import build_file_tool, build_read_tool
+from .hogar import build_home_tools
 from .lanzador import lanzar
 from .shell import build_shell_tool
 from .whatsapp import build_whatsapp_tools
@@ -233,6 +234,13 @@ def build_default_tools(tools_cfg: dict | None = None) -> list[Tool]:
         # Una en borrador y dos en envío: ahí redactar y enviar son dos pasos, con
         # el usuario diciendo que sí por en medio.
         tools.extend(build_whatsapp_tools(whatsapp_cfg))
+
+    # Las luces de casa. Interruptor propio porque no todo el mundo tiene un
+    # puente Hue, y sin él estas dos herramientas solo sirven para que el modelo
+    # las intente y falle: cada una que sobra es contexto gastado en cada frase.
+    hogar_cfg = (tools_cfg or {}).get("hogar", {})
+    if hogar_cfg.get("enabled", True):
+        tools.extend(build_home_tools(hogar_cfg))
 
     # Leer y escribir ficheros van con la shell: las tres tocan tus cosas, así que
     # las tres se quitan de en medio con `[tools.shell] enabled = false`.

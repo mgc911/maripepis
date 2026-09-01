@@ -14,6 +14,7 @@ def test_build_default_tools():
     assert nombres == {
         "abrir_navegador", "buscar_en_internet", "abrir_aplicacion",
         "consultar_tiempo", "preparar_mensaje_whatsapp",
+        "controlar_luces", "estado_de_las_luces",
         "escribir_fichero", "leer_fichero", "ejecutar_comando",
     }
     for t in tools:

@@ -52,6 +52,8 @@ maripepis-whatsapp = "maripepis.tools.whatsapp:main"
 # La sesión de WhatsApp: el demonio (lo arranca systemd) y con quién mirarlo.
 maripepis-whatsappd = "maripepis.whatsapp.daemon:main"
 maripepis-wa = "maripepis.whatsapp.cliente:main"
+# Las luces: vincularse al puente Hue (una vez, pulsando su botón) y ver qué hay.
+maripepis-hue = "maripepis.hogar.cliente:main"
 
 [tool.setuptools.packages.find]
 include = ["maripepis*"]

@@ -139,7 +139,7 @@ pulsa **Ctrl-C** para terminar. Ajusta la sensibilidad en `config.toml`:
 > El ciclo es secuencial (escucha → responde → escucha), así el micro no capta
 > la voz del asistente. Interrumpir hablando (*barge-in*) llegaría en una Fase 5.
 
-## Acciones: abrir apps, buscar, leer y escribir ficheros, ejecutar comandos, WhatsApp
+## Acciones: abrir apps, buscar, leer y escribir ficheros, ejecutar comandos, WhatsApp, luces
 
 Con `[tools] enabled = true` (por defecto), el asistente puede **ejecutar
 acciones** cuando se lo pides — el LLM decide cuándo (tool-calling):
@@ -159,6 +159,9 @@ acciones** cuando se lo pides — el LLM decide cuándo (tool-calling):
   WhatsApp con el mensaje **escrito**, para que le des a enviar tú. (Con sesión
   propia lo envía ella, pero antes te lee a quién va y qué pone, y espera tu «sí»
   — y si te arrepientes, *"bórralo"* lo retira.)
+- *"Apaga el salón"* / *"pon la cocina al 20"* / *"las luces en rojo"* → lo hace,
+  hablándole al puente Hue por la red local. Y *"¿me he dejado alguna luz dada?"*
+  va a mirarlo, no lo recuerda.
 - *"¿Cuánto es 7×8?"* / *"capital de Italia"* → responde directo, sin abrir nada.
 
 Hace las cosas en vez de explicarte cómo hacerlas: si te pide algo que puede
@@ -515,6 +518,91 @@ los dos pasos de una misma conversación.
 > Lo que sí se pierde por ahí es el desmentido en voz alta: `desmiente_envio` vive
 > en el turno con herramientas, y por esta vía no pasa. Queda la orden del *system
 > prompt* y el «NO está enviado» que devuelve la propia orden.
+
+### Las luces de casa
+
+*"Apaga el salón."* *"Pon la cocina al veinte."* *"Las luces en rojo."* *"Pon la
+escena relax."* *"¿Me he dejado alguna luz dada?"*
+
+Esto empezó siendo *"conéctate a mi cuenta de Google y controla el Google Home"*,
+y conviene dejar escrito por qué no es eso, para que nadie lo intente otra vez:
+
+| Vía de Google | Estado |
+|---|---|
+| SDK de Google Assistant | **Cerrada.** Era lo único que dejaba mandar «apaga la luz» por código; Google la retiró en 2023 |
+| Smart Device Management | Viva, pero solo llega a los **Nest** de la propia Google (termostato, cámaras, timbre), y con registro de pago |
+| Home APIs (2024-25) | SDKs de **Android y de iOS**, con verificación de marca |
+| Home Graph API | Para **fabricantes** de dispositivos, no para tu casa |
+
+Ninguna sirve para un script en Linux. Así que Maripepis le habla a la bombilla,
+no a la nube: la **API local** del puente Philips Hue. No pasa por internet, no
+hay token que caduque a media noche, y la luz se apaga en el mismo momento en que
+acabas la frase — que es justo lo que hace falta cuando lo pides hablando.
+
+**Vincularse, una vez.** La llave del puente solo se le da a quien está
+físicamente en la casa, y eso es precisamente la seguridad del invento:
+
+```bash
+maripepis-hue vincular      # y pulsas el botón redondo del puente
+maripepis-hue luces         # para ver cómo se llaman tus luces
+```
+
+La llave queda en `~/.config/maripepis/hue.toml`, en 600 y fuera de git, igual
+que la agenda de WhatsApp: con esa cadena, cualquiera que la lea enciende y apaga
+las luces de tu casa desde la red local. El puente se busca solo por mDNS y se
+recuerda; si cambia de IP porque el router se reinició, se vuelve a buscar sin
+que tengas que hacer nada. En `[tools.hogar]` puedes fijarla a mano si tu red no
+deja pasar el descubrimiento.
+
+**Los nombres son los tuyos.** Los de la app de Hue, y se dicen como se dicen: se
+quitan tildes y relleno, así que *"las luces del salón"*, *"Salon"* y *"el salón"*
+son lo mismo, y *"el dormitorio"* acierta con «Dormitorio principal». *"Todo"*,
+*"toda la casa"* o *"apaga la luz"* a secas van a todas. Si dices un sitio que no
+existe, no se inventa otro: te devuelve la lista de los que hay para que el
+asistente te pregunte cuál querías.
+
+**Los colores, por su nombre**: rojo, naranja, amarillo, verde, turquesa, cian,
+azul, morado, violeta, lila, rosa, magenta, melocotón — y los blancos por
+temperatura: cálido, neutro, frío, luz de día. *"Azul clarito"* se queda con el
+azul: perder el matiz es mejor servicio que contestar que no se ha entendido.
+
+Dos detalles que parecen pequeños y no lo son. Pedir brillo **enciende** la luz
+(atenuar una bombilla apagada no se ve, y quien lo pide la quiere encendida), y
+*"ponlo a cero"* la **apaga** de verdad, que es lo que quiere decir — en el
+puente, brillo 0 la deja al mínimo pero dada. Y en *"apaga toda la casa"*, que
+una bombilla esté sin corriente no cancela las demás: se apagan las que
+respondan y se dice cuántas no lo hicieron.
+
+**Con `backend = "claude-code"` va por la shell.** Ese proveedor trae sus propias
+herramientas y las de maripepis no le llegan, igual que le pasa a WhatsApp. Así
+que en vez de `controlar_luces` se le da **la orden hecha**, que por dentro llama
+a la misma función y devuelve su mismo texto:
+
+```bash
+maripepis-hue luz 'el salón' apagar
+maripepis-hue luz 'la cocina' --brillo 20 --color calido
+maripepis-hue luz 'salón' --escena relax
+maripepis-hue estado
+```
+
+Se le da la orden y no la explicación a propósito: contarle que hay un puente Hue
+en la red acaba con el modelo escribiendo un `curl` a una IP inventada, sin llave
+y sin la búsqueda por nombre, mientras alguien espera a oscuras. Necesita `Bash`
+en `[llm.claude_code] tools`; si no lo tiene, queda dicho en el log al arrancar.
+
+**Aquí no se confirma nada**, al revés que WhatsApp. No hace falta: encender una
+luz se deshace apagándola, se ve desde donde estás y no le llega a nadie más. La
+única acción que necesitaba una red de seguridad ya la tiene.
+
+Se quita con `[tools.hogar] enabled = false`, y conviene quitarlo si no tienes
+puente: sin él las dos herramientas solo sirven para que el modelo las intente y
+falle, y cada una que sobra es contexto gastado en cada frase.
+
+> **Lo que todavía no está.** Solo Hue. Los altavoces y pantallas Cast (Nest
+> Mini, Nest Hub, Chromecast) se controlan igual de bien en local con
+> `pychromecast`, y los enchufes y persianas casi siempre tienen API propia; la
+> puerta está abierta en `maripepis/hogar/`, cada cacharro con su módulo al lado
+> de `hue.py`. De Google no va a venir, por lo de la tabla de arriba.
 
 ### Comandos de zsh
 

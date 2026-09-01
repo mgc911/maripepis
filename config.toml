@@ -151,6 +151,26 @@ prefijo = "34"                 # prefijo de país para los números de 9 cifras;
 cliente = "zapzap"             # quien abre WhatsApp; tiene que entender un whatsapp://
                                # en la línea de órdenes
 
+[tools.hogar]
+# Las luces de casa: «apaga el salón», «pon la cocina al 20», «las luces en rojo»,
+# «pon la escena relax», «¿me he dejado alguna dada?».
+#
+# Habla con el puente Philips Hue por su API LOCAL, no con Google. No es por
+# gusto: para controlar un Google Home no hay API que valga —el SDK de Assistant
+# lo cerró Google en 2023, el de Nest solo llega a sus propios cacharros y de
+# pago, y las Home APIs nuevas son SDKs de móvil—. Hablándole al puente no hay
+# nube por medio, no hay token que caduque y la luz se apaga al momento.
+#
+# La llave del puente NO se pone aquí: se saca una vez con
+#     maripepis-hue vincular      (y pulsas el botón redondo del puente)
+# y se guarda en ~/.config/maripepis/hue.toml, fuera de git, con permisos 600.
+# Para ver cómo se llaman tus luces (que es como hay que pedirlas hablando):
+#     maripepis-hue luces
+enabled = true                 # false = el asistente no puede tocar las luces
+puente = ""                    # IP del puente (opcional). Vacío = se busca solo por
+                               # la red (mDNS) y se recuerda; ponla solo si tu red
+                               # no deja pasar el descubrimiento
+
 [memory]
 enabled = true                 # datos fijos del usuario y del equipo, siempre presentes
 path = ""                      # vacío = ~/.config/maripepis/memoria.md, o memoria.md junto

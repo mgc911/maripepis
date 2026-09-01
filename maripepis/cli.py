@@ -356,6 +356,47 @@ def orden_de_whatsapp() -> str:
     return shutil.which("maripepis-whatsapp") or ""
 
 
+def orden_de_hogar() -> str:
+    """La orden con la que se tocan las luces desde una shell, o ``""``.
+
+    Se busca donde la de WhatsApp y por lo mismo: como servicio, el `PATH` es el
+    de systemd y el venv no está en él.
+    """
+    junto_al_python = Path(sys.executable).parent / "maripepis-hue"
+    if junto_al_python.exists():
+        return str(junto_al_python)
+    return shutil.which("maripepis-hue") or ""
+
+
+def instrucciones_de_hogar_por_shell(orden: str) -> str:
+    """Las luces para un proveedor que no acepta nuestras herramientas.
+
+    Igual que con WhatsApp: se le da **la orden hecha**, no la explicación. Aquí
+    el motivo es todavía más claro que allí — contarle que hay un puente Hue en
+    la red acaba con el modelo escribiendo `curl` a una IP inventada, sin llave y
+    sin la búsqueda por nombre, mientras alguien espera a oscuras.
+    """
+    return (
+        " Las luces de casa las manejas ejecutando con Bash esta orden:"
+        f" {orden} luz 'SITIO' apagar — y en vez de `apagar`, `encender` o"
+        " `alternar`; o `--brillo` con un número del 0 al 100; o `--color` con el"
+        " color en español (rojo, azul, verde, naranja, rosa, morado, cálido,"
+        " frío...); o `--escena` con el nombre de una escena. Se pueden combinar:"
+        f" {orden} luz 'la cocina' --brillo 20 --color calido."
+        " El SITIO va TAL COMO lo haya dicho el usuario ('el salón', 'la"
+        " lamparita', 'todo'), sin traducirlo ni cambiarlo por el nombre que tú"
+        " creas que tiene: la orden ya lo busca, aguanta tildes y sobra el 'las"
+        " luces de'. Si te contesta que ese sitio no existe, te da la lista de los"
+        " que hay: pregúntale al usuario con esa lista cuál quería, y no lo"
+        " reintentes con otro nombre inventado."
+        f" Para saber qué hay encendido ejecuta {orden} estado, y cuéntale lo que"
+        " diga: NO contestes de memoria ni por lo que hicieras en otro turno, que"
+        " en casa hay más gente y los interruptores siguen puestos en la pared."
+        " Cuéntale al usuario lo que te conteste la orden, tal cual, también"
+        " cuando diga que NO ha tocado nada."
+    )
+
+
 def puede_ejecutar_ordenes(cfg: dict) -> bool:
     """¿El proveedor con herramientas propias tiene alguna para ejecutar cosas?"""
     suyas = str(cfg.get("llm", {}).get("claude_code", {}).get("tools", "")).lower()
@@ -468,6 +509,18 @@ def instrucciones_de_herramientas(nombres: set[str]) -> str:
             " va y qué pone. Nunca digas que lo has enviado, que ya está mandado ni"
             " que le ha llegado, ni siquiera si la herramienta ha ido bien."
         )
+    if "controlar_luces" in nombres:
+        instrucciones += (
+            " Las luces de casa las manejas con controlar_luces: encender, apagar,"
+            " brillo del 0 al 100, color por su nombre y escenas del puente. Pásale el"
+            " sitio TAL COMO lo haya dicho el usuario («el salón», «la lamparita»), sin"
+            " traducirlo ni inventarte el nombre que crees que tiene: ella lo busca. Si"
+            " te contesta que ese sitio no existe, te da la lista de los que hay;"
+            " pregúntale con esa lista cuál quería. Y antes de decir si hay algo"
+            " encendido, míralo con estado_de_las_luces: en casa hay más gente y los"
+            " interruptores siguen puestos en la pared."
+        )
+
     # Lo importante: que actúe. Sin esta orden, ante «créame una carpeta» el
     # modelo contesta con un `mkdir` para que lo escriba el usuario, que es
     # justo lo que no sirve cuando se lo estás pidiendo hablando.
@@ -556,6 +609,21 @@ def main(argv: list[str] | None = None) -> int:
         elif orden:
             logger.info(
                 "WhatsApp queda fuera: %s no tiene con qué ejecutar órdenes "
+                "(añade Bash a [llm.claude_code] tools).", provider.label,
+            )
+
+        # Y las luces, por lo mismo: sin la orden, el modelo se pone a inventar
+        # peticiones al puente —que necesitan una llave que él no tiene— o se
+        # limita a decir que ya está. Las dos acaban con la luz igual que estaba.
+        hogar_cfg = cfg.get("tools", {}).get("hogar", {})
+        orden_luces = orden_de_hogar() if hogar_cfg.get("enabled", True) else ""
+        if orden_luces and puede_ejecutar_ordenes(cfg):
+            logger.info("Las luces van por la shell de %s: %s",
+                        provider.label, orden_luces)
+            cfg["llm"]["system_prompt"] += instrucciones_de_hogar_por_shell(orden_luces)
+        elif orden_luces:
+            logger.info(
+                "Las luces quedan fuera: %s no tiene con qué ejecutar órdenes "
                 "(añade Bash a [llm.claude_code] tools).", provider.label,
             )
     elif acciones_on:
